@@ -106,6 +106,7 @@ qad/
 
 | Doc | Description |
 |---|---|
+| [Customer Delivery Guide](docs/customer-delivery-guide.md) | End-to-end guide for delivering QAD to a new customer |
 | [Architecture](docs/architecture.md) | System design, data flow, component relationships |
 | [Operator Guide](docs/operator-guide.md) | Day-to-day operation, dashboard walkthrough, exception handling |
 | [Deployment Guide](docs/deployment-guide.md) | Production setup, environment variables, domain config |
