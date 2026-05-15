@@ -22,10 +22,113 @@ services:
         aliases:
           - postgres
 
+  n8n:
+    image: n8nio/n8n:latest
+    container_name: qad-n8n
+    restart: unless-stopped
+    ports:
+      - "5678:5678"
+    environment:
+      DB_TYPE: postgresdb
+      DB_POSTGRESDB_HOST: postgres
+      DB_POSTGRESDB_PORT: 5432
+      DB_POSTGRESDB_DATABASE: ${N8N_DB:-qad_db}
+      DB_POSTGRESDB_USER: ${POSTGRES_USER:-qad_user}
+      DB_POSTGRESDB_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+      DB_POSTGRESDB_SCHEMA: n8n
+      N8N_HOST: ${N8N_HOST:-localhost}
+      N8N_PORT: 5678
+      N8N_PROTOCOL: http
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY:-qad-change-this-32char-secret-key}
+      N8N_BASIC_AUTH_ACTIVE: "true"
+      N8N_BASIC_AUTH_USER: ${N8N_BASIC_AUTH_USER:-admin}
+      N8N_BASIC_AUTH_PASSWORD: ${N8N_BASIC_AUTH_PASSWORD:-qadpass123}
+      WEBHOOK_URL: ${WEBHOOK_URL:-http://localhost:5678/}
+      GENERIC_TIMEZONE: ${GENERIC_TIMEZONE:-America/Los_Angeles}
+      OLLAMA_BASE_URL: http://ollama:11434
+    volumes:
+      - n8n_data:/home/node/.n8n
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      default: {}
+      qad-network:
+        aliases:
+          - n8n
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: qad-ollama
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    environment:
+      OLLAMA_HOST: 0.0.0.0:11434
+    # Uncomment to enable GPU acceleration (requires nvidia-container-toolkit):
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+    networks:
+      default: {}
+      qad-network:
+        aliases:
+          - ollama
+
+  api:
+    build:
+      context: ./dashboard/api
+      dockerfile: Dockerfile
+    container_name: qad-dashboard-api
+    restart: unless-stopped
+    ports:
+      - "3001:3001"
+    environment:
+      PGHOST: postgres
+      PGPORT: 5432
+      PGDATABASE: ${POSTGRES_DB:-qad}
+      PGUSER: ${POSTGRES_USER:-qad_user}
+      PGPASSWORD: ${POSTGRES_PASSWORD:-changeme}
+      PORT: 3001
+      NODE_ENV: production
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      default: {}
+      qad-network:
+
+  client:
+    build:
+      context: ./dashboard/client
+      dockerfile: Dockerfile
+    container_name: qad-client
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    depends_on:
+      - api
+    networks:
+      default: {}
+      qad-network:
+
 networks:
+  default: {}
   qad-network:
     name: docker_qad-network
     external: true
 
 volumes:
   postgres_data:
+  n8n_data:
+    external: true
+    name: docker_n8n_data
+  ollama_data:
+    external: true
+    name: docker_ollama_data
