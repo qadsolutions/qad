@@ -1,0 +1,2276 @@
+{
+  "updatedAt": "2026-05-11T18:16:42.972Z",
+  "createdAt": "2026-05-11T17:52:57.442Z",
+  "id": "muVXGTx7suWyjaiT",
+  "name": "Appointment & Scheduling Automation v1",
+  "description": null,
+  "active": true,
+  "isArchived": false,
+  "nodes": [
+    {
+      "id": "n_webhook",
+      "name": "Appointment Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        300
+      ],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "appointment",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "webhookId": "3aebc682-d090-4416-b4cb-c83527800cf5"
+    },
+    {
+      "id": "n_normalize",
+      "name": "Normalize Appointment",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        300
+      ],
+      "parameters": {
+        "jsCode": "const raw = $input.first().json.body || $input.first().json;\nconst CONFIG = {\"business_hours\":{\"mon\":{\"open\":\"08:00\",\"close\":\"18:00\"},\"tue\":{\"open\":\"08:00\",\"close\":\"18:00\"},\"wed\":{\"open\":\"08:00\",\"close\":\"18:00\"},\"thu\":{\"open\":\"08:00\",\"close\":\"18:00\"},\"fri\":{\"open\":\"08:00\",\"close\":\"17:00\"},\"sat\":{\"open\":\"09:00\",\"close\":\"13:00\"},\"sun\":null},\"service_durations\":{\"consultation\":30,\"initial_visit\":60,\"follow_up\":15,\"showing\":45,\"assessment\":90,\"checkup\":30,\"default\":60},\"buffer_after_minutes\":15,\"min_advance_hours\":2,\"max_advance_days\":90,\"auto_confirm_sources\":[\"internal\",\"crm\",\"staff\"],\"urgent_review_required\":true};\nconst now = new Date().toISOString();\nconst apptId = 'appt_' + Date.now() + '_' + Math.random().toString(36).substr(2,9);\nconst execId = $execution?.id || 'exec_' + Date.now();\n\nconst srcType = raw.source_type || (\n  raw.form_id ? 'form' : raw.widget_id ? 'widget' :\n  raw.email_thread ? 'email' : raw.crm_id ? 'crm' : 'api'\n);\n\nconst svcType = (raw.service_type || 'default').toLowerCase();\nconst durationMin = parseInt(raw.duration_minutes) ||\n  CONFIG.service_durations[svcType] || CONFIG.service_durations.default || 60;\nconst bufferAfter = raw.buffer_after_minutes !== undefined ? parseInt(raw.buffer_after_minutes) : CONFIG.buffer_after_minutes;\nconst bufferBefore = parseInt(raw.buffer_before_minutes) || 0;\n\nlet requestedTime = null, endTime = null;\ntry {\n  if (raw.requested_time) {\n    requestedTime = new Date(raw.requested_time).toISOString();\n    endTime = new Date(new Date(requestedTime).getTime() + (durationMin + bufferAfter) * 60000).toISOString();\n  }\n} catch(e) {}\n\nconst appt = {\n  appointment_id: raw.appointment_id || apptId,\n  execution_id: execId,\n  workflow_version: 'appointment_scheduling_v1',\n  client_id: raw.client_id || 'default',\n\n  request_type: raw.request_type || null,\n  source_type: srcType,\n  source_channel: raw.source_channel || null,\n\n  contact_name: raw.contact_name || raw.name || null,\n  contact_email: (raw.contact_email || raw.email || '').toLowerCase().trim() || null,\n  contact_phone: raw.contact_phone || raw.phone || null,\n\n  service_type: svcType,\n  appointment_type: raw.appointment_type || raw.type || null,\n\n  requested_time: requestedTime,\n  confirmed_time: null,\n  end_time: endTime,\n  timezone: raw.timezone || 'UTC',\n  duration_minutes: durationMin,\n  buffer_before_minutes: bufferBefore,\n  buffer_after_minutes: bufferAfter,\n\n  assigned_staff: raw.assigned_staff || raw.staff || null,\n  calendar_target: raw.calendar_target || 'default',\n  location_or_link: raw.location || raw.meeting_link || raw.address || null,\n\n  status: 'pending',\n  urgency_level: (raw.urgency_level || raw.urgency || 'normal').toLowerCase(),\n\n  notes: raw.notes || raw.message || raw.description || null,\n  consent_flags: raw.consent_flags || {},\n  metadata: raw.metadata || {},\n\n  // Will be set by downstream nodes\n  intent: null, intent_confidence: 0, intent_source: null,\n  availability_checked: false, conflict_detected: false, conflict_details: null,\n  alternatives: [], auto_confirmed: false, scheduling_decision: {},\n  validation_passed: null, validation_errors: [],\n  reminder_sequence: [],\n  previous_appointment_id: raw.previous_appointment_id || raw.original_id || null,\n  cancel_reason: raw.cancel_reason || null,\n  ai_model_used: null, ai_model_source: null, ai_response_time_ms: 0, ai_fallback_used: false,\n  error_message: null, flags: [],\n  received_at: now, processed_at: null,\n  _config: CONFIG\n};\n\nreturn [{ json: { appt, raw_payload: raw } }];"
+      }
+    },
+    {
+      "id": "n_classify",
+      "name": "Classify Intent",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        440,
+        300
+      ],
+      "parameters": {
+        "jsCode": "const data = $input.first().json;\nconst appt = { ...data.appt };\nappt.flags = Array.isArray(appt.flags) ? [...appt.flags] : [];\n\nconst validIntents = ['book', 'reschedule', 'cancel', 'inquiry'];\n\n// Honour explicit request_type from caller — highest priority\nif (appt.request_type && validIntents.includes(appt.request_type.toLowerCase())) {\n  appt.intent = appt.request_type.toLowerCase();\n  appt.intent_confidence = 1.0;\n  appt.intent_source = 'explicit';\n  return [{ json: { appt, raw_payload: data.raw_payload } }];\n}\n\n// Keyword scan across notes + subject + service type\nconst txt = ((appt.notes || '') + ' ' + (appt.service_type || '') + ' ' + (appt.appointment_type || '')).toLowerCase();\n\nlet intent = null, confidence = 0;\nif (/\\b(cancel|cancell|can't make|no longer need|want to cancel|remove my|delete my)/.test(txt)) {\n  intent = 'cancel'; confidence = 0.90;\n} else if (/\\b(reschedul|move|postpone|push back|change.*time|different (day|time)|new time|can we move|need to move)/.test(txt)) {\n  intent = 'reschedule'; confidence = 0.88;\n} else if (/\\b(book|schedule|appointment|reserve|set up|need.*appt|make.*appt|sign up|register)/.test(txt)) {\n  intent = 'book'; confidence = 0.85;\n} else if (/\\b(available|availability|open slot|when.*open|check|do you have|what time)/.test(txt)) {\n  intent = 'inquiry'; confidence = 0.80;\n} else if (appt.requested_time) {\n  intent = 'book'; confidence = 0.55;  // has a time = probably booking\n} else {\n  intent = null; confidence = 0;\n}\n\nappt.intent = intent;\nappt.intent_confidence = confidence;\nappt.intent_source = 'keyword';\nreturn [{ json: { appt, raw_payload: data.raw_payload } }];"
+      }
+    },
+    {
+      "id": "n_ollama_intent",
+      "name": "Ollama Intent",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        660,
+        300
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:11434/api/generate",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "{\n  \"model\": \"llama3.2\",\n  \"prompt\": \"You are a scheduling assistant. Classify the intent of this message into one of: book, reschedule, cancel, inquiry.\\n\\nMessage: {{ ($json.appt.notes || $json.appt.appointment_type || 'no message provided').substring(0, 500) }}\\n\\nReturn ONLY this JSON (no explanation):\\n{\\\"intent\\\": \\\"book\\\", \\\"confidence\\\": 0.85, \\\"reason\\\": \\\"brief reason\\\"}\",\n  \"stream\": false,\n  \"format\": \"json\"\n}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "continueOnFail": true
+    },
+    {
+      "id": "n_parse_intent",
+      "name": "Parse Ollama Intent",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        880,
+        300
+      ],
+      "parameters": {
+        "jsCode": "const ollamaData = $input.first().json;\nconst prevData = $('Classify Intent').first().json;\nconst appt = { ...prevData.appt };\nappt.flags = Array.isArray(appt.flags) ? [...appt.flags] : [];\nconst validIntents = ['book', 'reschedule', 'cancel', 'inquiry'];\n\n// If intent was already set with high confidence (explicit or clear keyword), skip AI\nif (appt.intent_confidence >= 0.85) {\n  return [{ json: { appt, raw_payload: prevData.raw_payload } }];\n}\n\ntry {\n  const ollamaRaw = ollamaData.response || null;\n  if (!ollamaRaw || ollamaData.error) throw new Error('Ollama unavailable');\n  const parsed = typeof ollamaRaw === 'string' ? JSON.parse(ollamaRaw) : ollamaRaw;\n  const aiIntent = (parsed.intent || '').toLowerCase().trim();\n  const aiConf = Math.min(1, Math.max(0, typeof parsed.confidence === 'number' ? parsed.confidence : parseFloat(parsed.confidence) || 0));\n\n  if (validIntents.includes(aiIntent)) {\n    if (appt.intent === aiIntent) {\n      appt.intent_confidence = Math.min(1, appt.intent_confidence + 0.08);\n      appt.intent_source = 'keyword+ai_consensus';\n    } else {\n      appt.intent = aiIntent;\n      appt.intent_confidence = aiConf;\n      appt.intent_source = 'ai_resolved';\n    }\n    appt.ai_model_used = 'llama3.2';\n    appt.ai_model_source = 'ollama_local';\n    appt.ai_fallback_used = false;\n  }\n} catch(e) {\n  appt.flags.push('ai_intent_fallback');\n  appt.ai_fallback_used = true;\n  appt.ai_model_source = 'fallback';\n}\n\n// Final fallback — default to 'book' if still unresolved\nif (!appt.intent || !validIntents.includes(appt.intent)) {\n  appt.intent = appt.requested_time ? 'book' : 'inquiry';\n  appt.intent_confidence = 0.40;\n  appt.intent_source = 'default_fallback';\n  appt.flags.push('intent_fallback');\n}\n\nreturn [{ json: { appt, raw_payload: prevData.raw_payload } }];"
+      }
+    },
+    {
+      "id": "n_router",
+      "name": "Intent Router",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [
+        1100,
+        300
+      ],
+      "parameters": {
+        "mode": "rules",
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": false,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.appt.intent }}",
+                    "rightValue": "book",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "book"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": false,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.appt.intent }}",
+                    "rightValue": "reschedule",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "reschedule"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": false,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.appt.intent }}",
+                    "rightValue": "cancel",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "cancel"
+            }
+          ]
+        },
+        "fallbackOutput": "extra"
+      }
+    },
+    {
+      "id": "n_validate",
+      "name": "Validate Booking",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1340,
+        120
+      ],
+      "parameters": {
+        "jsCode": "const data = $input.first().json;\nconst appt = { ...data.appt };\nappt.flags = Array.isArray(appt.flags) ? [...appt.flags] : [];\nconst errors = [];\nconst warnings = [];\nconst CONFIG = appt._config || {};\n\nconst isInquiry = appt.intent === 'inquiry';\n\nif (!appt.contact_email) errors.push('contact_email is required');\n\n// requested_time required for book/reschedule/cancel — optional for inquiry\nif (!appt.requested_time && !isInquiry) {\n  errors.push('requested_time is required — format: ISO 8601 e.g. 2026-05-15T14:00:00Z');\n}\n\nif (appt.requested_time) {\n  const reqMs = new Date(appt.requested_time).getTime();\n  const minMs = Date.now() + (CONFIG.min_advance_hours || 2) * 3600000;\n  const maxMs = Date.now() + (CONFIG.max_advance_days || 90) * 86400000;\n  if (reqMs < minMs) errors.push('Must book at least ' + (CONFIG.min_advance_hours || 2) + ' hours in advance');\n  if (reqMs > maxMs) errors.push('Cannot book more than ' + (CONFIG.max_advance_days || 90) + ' days out');\n\n  // Business hours: soft flag only — outside hours routes to pending_review, not rejection\n  const days = ['sun','mon','tue','wed','thu','fri','sat'];\n  const bh = CONFIG.business_hours || {};\n  const reqDate = new Date(appt.requested_time);\n  const dayKey = days[reqDate.getUTCDay()];\n  const dayHours = bh[dayKey];\n  if (dayHours === null || dayHours === undefined) {\n    warnings.push('Requested day is outside standard business days');\n    appt.flags.push('outside_business_hours');\n  } else if (dayHours) {\n    const reqHr = reqDate.getUTCHours() + reqDate.getUTCMinutes() / 60;\n    const [oh, om] = dayHours.open.split(':').map(Number);\n    const [ch, cm] = dayHours.close.split(':').map(Number);\n    if (reqHr < oh + om/60 || reqHr >= ch + cm/60) {\n      warnings.push('Requested time is outside standard business hours (' + dayHours.open + '-' + dayHours.close + ' UTC)');\n      appt.flags.push('outside_business_hours');\n    }\n  }\n}\n\nif (appt.urgency_level === 'urgent') appt.flags.push('urgent_request');\n\nif (errors.length > 0) {\n  appt.validation_passed = false;\n  appt.validation_errors = errors;\n  appt.status = 'rejected';\n} else {\n  appt.validation_passed = true;\n  appt.validation_warnings = warnings;\n}\nreturn [{ json: { appt, raw_payload: data.raw_payload } }];"
+      }
+    },
+    {
+      "id": "n_val_gate",
+      "name": "Validation Gate",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1560,
+        120
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.appt.validation_passed }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      }
+    },
+    {
+      "id": "n_check_avail",
+      "name": "Check Availability",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1780,
+        60
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT\n  COUNT(*) AS conflict_count,\n  COALESCE(STRING_AGG(\n    appointment_id || ':' || COALESCE(contact_name,'Unknown') || ':' || COALESCE(confirmed_time::text,''),\n    ' | '\n  ), '') AS conflict_details\nFROM appointment_log\nWHERE status IN ('confirmed','pending_review','pending')\nAND client_id = '{{ $json.appt.client_id }}'\nAND confirmed_time IS NOT NULL\nAND end_time IS NOT NULL\nAND (confirmed_time, end_time) OVERLAPS (\n  '{{ $json.appt.requested_time }}'::timestamptz,\n  '{{ $json.appt.end_time }}'::timestamptz\n){{ $json.appt.assigned_staff ? \" AND assigned_staff = '\" + $json.appt.assigned_staff + \"'\" : \"\" }}",
+        "options": {}
+      },
+      "credentials": {
+        "postgres": {
+          "id": "MMScP2tKEgzvhkYM",
+          "name": "Postgres account"
+        }
+      },
+      "continueOnFail": true
+    },
+    {
+      "id": "n_proc_avail",
+      "name": "Process Availability",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2000,
+        60
+      ],
+      "parameters": {
+        "jsCode": "const pgRow = $input.first().json;\nconst apptData = $('Validate Booking').first().json;\nconst appt = { ...apptData.appt };\nappt.flags = Array.isArray(appt.flags) ? [...appt.flags] : [];\n\nconst conflicts = parseInt(pgRow.conflict_count || pgRow[0]?.conflict_count || 0);\nappt.availability_checked = true;\n\nif (conflicts > 0) {\n  appt.conflict_detected = true;\n  appt.conflict_details = pgRow.conflict_details || pgRow[0]?.conflict_details || '';\n  appt.status = 'conflict';\n  appt.flags.push('slot_unavailable');\n\n  // Suggest alternatives at +30min, +1h, +2h, next business day\n  const base = new Date(appt.requested_time).getTime();\n  appt.alternatives = [\n    { offset: '+30 min',   time: new Date(base + 30*60000).toISOString() },\n    { offset: '+1 hour',   time: new Date(base + 60*60000).toISOString() },\n    { offset: '+2 hours',  time: new Date(base + 120*60000).toISOString() },\n    { offset: 'Next day',  time: new Date(base + 86400000).toISOString() }\n  ];\n} else {\n  appt.conflict_detected = false;\n  appt.flags.push('slot_available');\n}\nreturn [{ json: { appt, raw_payload: apptData.raw_payload } }];"
+      }
+    },
+    {
+      "id": "n_avail_gate",
+      "name": "Availability Gate",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        2220,
+        60
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.appt.conflict_detected }}",
+              "rightValue": false,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      }
+    },
+    {
+      "id": "n_decision",
+      "name": "Build Booking Decision",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2440,
+        -40
+      ],
+      "parameters": {
+        "jsCode": "const data = $input.first().json;\nconst appt = { ...data.appt };\nappt.flags = Array.isArray(appt.flags) ? [...appt.flags] : [];\nconst cfg = appt._config || {};\nconst autoSources = cfg.auto_confirm_sources || ['internal','crm','staff'];\n\nlet autoConfirm = false, reason = '';\n\nif (autoSources.includes(appt.source_type)) {\n  autoConfirm = true; reason = 'trusted_source:' + appt.source_type;\n} else if (appt.intent_confidence >= 0.90 && appt.urgency_level !== 'urgent') {\n  autoConfirm = true; reason = 'high_confidence_booking';\n} else {\n  autoConfirm = false; reason = 'standard_review';\n}\n\n// Urgent always gets staff review regardless of source\nif (appt.urgency_level === 'urgent' && cfg.urgent_review_required !== false) {\n  autoConfirm = false; reason = 'urgent_requires_staff_review';\n  appt.flags.push('urgent_staff_review');\n}\n\n// Outside business hours -> staff review\nif (appt.flags.includes('outside_business_hours')) {\n  autoConfirm = false;\n  reason = reason === 'trusted_source:' + appt.source_type ? reason : 'outside_business_hours_requires_review';\n  if (!appt.flags.includes('hours_review')) appt.flags.push('hours_review');\n}\n\nappt.auto_confirmed = autoConfirm;\nappt.scheduling_decision = { auto_confirm: autoConfirm, reason, decided_at: new Date().toISOString() };\nreturn [{ json: { appt, raw_payload: data.raw_payload } }];"
+      }
+    },
+    {
+      "id": "n_auto_gate",
+      "name": "Auto-Confirm Gate",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        2660,
+        -40
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.appt.auto_confirmed }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      }
+    },
+    {
+      "id": "n_confirm",
+      "name": "Confirm Appointment",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2880,
+        -120
+      ],
+      "parameters": {
+        "jsCode": "const data = $input.first().json;\nconst appt = { ...data.appt };\nappt.flags = Array.isArray(appt.flags) ? [...appt.flags] : [];\n\nappt.confirmed_time = appt.requested_time;\nappt.status = 'confirmed';\nappt.auto_confirmed = true;\nappt.processed_at = new Date().toISOString();\n\n// Build reminder sequence based on how far away the appointment is\nconst confMs = new Date(appt.confirmed_time).getTime();\nconst nowMs = Date.now();\nconst hoursAway = (confMs - nowMs) / 3600000;\nconst seq = [{ type: 'confirmation', send_at: new Date().toISOString(), sent: true }];\nif (hoursAway > 24) seq.push({ type: '24h_reminder', send_at: new Date(confMs - 86400000).toISOString(), sent: false });\nif (hoursAway > 2)  seq.push({ type: '2h_reminder',  send_at: new Date(confMs - 7200000).toISOString(),  sent: false });\nif (hoursAway > 0)  seq.push({ type: 'follow_up',    send_at: new Date(confMs + 7200000).toISOString(),  sent: false });\nappt.reminder_sequence = seq;\n\nreturn [{ json: { appt, raw_payload: data.raw_payload } }];"
+      }
+    },
+    {
+      "id": "n_email_confirm",
+      "name": "Send Confirmation",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2,
+      "position": [
+        3100,
+        -120
+      ],
+      "parameters": {
+        "sendTo": "={{ $json.appt.contact_email }}",
+        "subject": "={{ 'Appointment Confirmed — ' + ($json.appt.service_type || 'Appointment') + ' on ' + new Date($json.appt.confirmed_time).toLocaleDateString('en-US', {weekday:'short',month:'short',day:'numeric',year:'numeric'}) }}",
+        "emailType": "html",
+        "message": "={{ '<h2 style=\"color:#2d6a4f\">Your Appointment is Confirmed</h2><table style=\"border-collapse:collapse;width:100%;max-width:560px\"><tr><td style=\"padding:8px 12px;border:1px solid #ddd;background:#f9f9f9\"><b>Service</b></td><td style=\"padding:8px 12px;border:1px solid #ddd\">' + ($json.appt.service_type || 'Appointment') + '</td></tr><tr><td style=\"padding:8px 12px;border:1px solid #ddd;background:#f9f9f9\"><b>Date & Time</b></td><td style=\"padding:8px 12px;border:1px solid #ddd\">' + new Date($json.appt.confirmed_time).toLocaleString('en-US', {timeZone:$json.appt.timezone||'UTC'}) + ' (' + ($json.appt.timezone||'UTC') + ')</td></tr><tr><td style=\"padding:8px 12px;border:1px solid #ddd;background:#f9f9f9\"><b>Duration</b></td><td style=\"padding:8px 12px;border:1px solid #ddd\">' + $json.appt.duration_minutes + ' minutes</td></tr>' + ($json.appt.location_or_link ? '<tr><td style=\"padding:8px 12px;border:1px solid #ddd;background:#f9f9f9\"><b>Location / Link</b></td><td style=\"padding:8px 12px;border:1px solid #ddd\">' + $json.appt.location_or_link + '</td></tr>' : '') + ($json.appt.assigned_staff ? '<tr><td style=\"padding:8px 12px;border:1px solid #ddd;background:#f9f9f9\"><b>With</b></td><td style=\"padding:8px 12px;border:1px solid #ddd\">' + $json.appt.assigned_staff + '</td></tr>' : '') + '<tr><td style=\"padding:8px 12px;border:1px solid #ddd;background:#f9f9f9\"><b>Reference ID</b></td><td style=\"padding:8px 12px;border:1px solid #ddd;font-family:monospace\">' + $json.appt.appointment_id + '</td></tr></table>' + ($json.appt.notes ? '<p><b>Your notes:</b> ' + $json.appt.notes + '</p>' : '') + '<p style=\"color:#555;font-size:13px\">To reschedule or cancel, contact us and reference your ID above.</p>' }}",
+        "options": {}
+      },
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "bHMHyGqUtDInnHet",
+          "name": "Gmail account"
+        }
+      },
+      "continueOnFail": true,
+      "webhookId": "1a6fa75d-729a-4fd5-9aac-33428b4f2ecc"
+    },
+    {
+      "id": "n_queue",
+      "name": "Queue for Review",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2880,
+        0
+      ],
+      "parameters": {
+        "jsCode": "const data = $input.first().json;\nconst appt = { ...data.appt };\nappt.status = 'pending_review';\nappt.confirmed_time = appt.requested_time;\nappt.auto_confirmed = false;\nappt.processed_at = new Date().toISOString();\nreturn [{ json: { appt, raw_payload: data.raw_payload } }];"
+      }
+    },
+    {
+      "id": "n_notify_staff",
+      "name": "Notify Staff",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2,
+      "position": [
+        3100,
+        0
+      ],
+      "parameters": {
+        "sendTo": "qadautomation@gmail.com",
+        "subject": "={{ '[Review Required] ' + ($json.appt.urgency_level === 'urgent' ? '🚨 URGENT — ' : '') + ($json.appt.service_type || 'Appointment') + ' request from ' + ($json.appt.contact_name || $json.appt.contact_email) }}",
+        "emailType": "html",
+        "message": "={{ '<h2>Appointment Request — Staff Review Required</h2><table style=\"border-collapse:collapse;width:100%;max-width:560px\"><tr><td style=\"padding:8px;border:1px solid #ddd\"><b>Client</b></td><td style=\"padding:8px;border:1px solid #ddd\">' + ($json.appt.contact_name || 'N/A') + ' (' + ($json.appt.contact_email || 'N/A') + ')</td></tr><tr><td style=\"padding:8px;border:1px solid #ddd\"><b>Service</b></td><td style=\"padding:8px;border:1px solid #ddd\">' + ($json.appt.service_type || 'N/A') + '</td></tr><tr><td style=\"padding:8px;border:1px solid #ddd\"><b>Requested Time</b></td><td style=\"padding:8px;border:1px solid #ddd\">' + ($json.appt.requested_time ? new Date($json.appt.requested_time).toLocaleString() : 'N/A') + '</td></tr><tr><td style=\"padding:8px;border:1px solid #ddd\"><b>Urgency</b></td><td style=\"padding:8px;border:1px solid #ddd\">' + $json.appt.urgency_level + '</td></tr><tr><td style=\"padding:8px;border:1px solid #ddd\"><b>ID</b></td><td style=\"padding:8px;border:1px solid #ddd;font-family:monospace\">' + $json.appt.appointment_id + '</td></tr><tr><td style=\"padding:8px;border:1px solid #ddd\"><b>Reason Queued</b></td><td style=\"padding:8px;border:1px solid #ddd\">' + (($json.appt.scheduling_decision || {}).reason || 'N/A') + '</td></tr></table><p>Please confirm or decline this appointment.</p>' }}",
+        "options": {}
+      },
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "bHMHyGqUtDInnHet",
+          "name": "Gmail account"
+        }
+      },
+      "continueOnFail": true,
+      "webhookId": "e4307e6d-99f4-4275-a907-eb72ad6e7e09"
+    },
+    {
+      "id": "n_conflict",
+      "name": "Handle Conflict",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2440,
+        140
+      ],
+      "parameters": {
+        "jsCode": "const data = $input.first().json;\nconst appt = { ...data.appt };\nappt.status = 'conflict';\nappt.processed_at = new Date().toISOString();\nreturn [{ json: { appt, raw_payload: data.raw_payload } }];"
+      }
+    },
+    {
+      "id": "n_email_conflict",
+      "name": "Send Conflict Notice",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2,
+      "position": [
+        2660,
+        140
+      ],
+      "parameters": {
+        "sendTo": "={{ $json.appt.contact_email }}",
+        "subject": "={{ 'Time Slot Unavailable — ' + ($json.appt.service_type || 'Appointment') + ' Request' }}",
+        "emailType": "html",
+        "message": "={{ '<h2>That time slot is not available</h2><p>We could not book your ' + ($json.appt.service_type || 'appointment') + ' for ' + new Date($json.appt.requested_time).toLocaleString() + '.</p><h3>Available alternatives:</h3><ul>' + ($json.appt.alternatives || []).map(a => '<li>' + a.offset + ': ' + new Date(a.time).toLocaleString() + '</li>').join('') + '</ul><p>Reply to this email or rebook using your reference: <code>' + $json.appt.appointment_id + '</code></p>' }}",
+        "options": {}
+      },
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "bHMHyGqUtDInnHet",
+          "name": "Gmail account"
+        }
+      },
+      "continueOnFail": true,
+      "webhookId": "46e34054-e9e7-4574-8c9c-2e7c952f0c71"
+    },
+    {
+      "id": "n_val_fail",
+      "name": "Validation Fail Response",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1780,
+        260
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { status: \"error\", error_type: \"validation\", errors: $json.appt.validation_errors, appointment_id: $json.appt.appointment_id } }}",
+        "options": {
+          "responseCode": 400
+        }
+      }
+    },
+    {
+      "id": "n_val_fail_log",
+      "name": "Log Validation Failure",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1780,
+        380
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO appointment_log (appointment_id, execution_id, workflow_version, client_id, source_type, contact_email, service_type, requested_time, status, validation_passed, validation_errors, raw_payload, normalized_payload, received_at, processed_at) VALUES ('{{ $json.appt.appointment_id }}', {{ $json.appt.execution_id ? \"'\" + $json.appt.execution_id + \"'\" : 'NULL' }}, 'appointment_scheduling_v1', '{{ $json.appt.client_id }}', {{ $json.appt.source_type ? \"'\" + $json.appt.source_type + \"'\" : 'NULL' }}, {{ $json.appt.contact_email ? \"'\" + $json.appt.contact_email + \"'\" : 'NULL' }}, {{ $json.appt.service_type ? \"'\" + $json.appt.service_type + \"'\" : 'NULL' }}, {{ $json.appt.requested_time ? \"'\" + $json.appt.requested_time + \"'\" : 'NULL' }}::timestamptz, 'rejected', false, '{{ JSON.stringify($json.appt.validation_errors) }}'::jsonb, '{{ JSON.stringify($json.raw_payload).replace(/'/g,\"''\") }}'::jsonb, '{{ JSON.stringify($json.appt).replace(/'/g,\"''\") }}'::jsonb, NOW(), NOW()) ON CONFLICT (appointment_id) DO NOTHING;",
+        "options": {}
+      },
+      "credentials": {
+        "postgres": {
+          "id": "MMScP2tKEgzvhkYM",
+          "name": "Postgres account"
+        }
+      },
+      "continueOnFail": true
+    },
+    {
+      "id": "n_build_reschedule",
+      "name": "Build Reschedule",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1340,
+        380
+      ],
+      "parameters": {
+        "jsCode": "const data = $input.first().json;\nconst appt = { ...data.appt };\nappt.flags = Array.isArray(appt.flags) ? [...appt.flags] : [];\nconst errors = [];\n\nconst lookupId = appt.previous_appointment_id || appt.appointment_id;\nif (!lookupId) errors.push('appointment_id or previous_appointment_id required for rescheduling');\nif (!appt.requested_time) errors.push('New requested_time is required');\nif (!appt.contact_email) errors.push('contact_email required to verify identity');\n\nappt.lookup_id = lookupId;\n\nif (errors.length > 0) {\n  appt.validation_passed = false;\n  appt.validation_errors = errors;\n  appt.status = 'rejected';\n} else {\n  appt.validation_passed = true;\n}\nreturn [{ json: { appt, raw_payload: data.raw_payload } }];"
+      }
+    },
+    {
+      "id": "n_check_new_slot",
+      "name": "Check New Slot",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1560,
+        380
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT COUNT(*) AS conflict_count\nFROM appointment_log\nWHERE status IN ('confirmed','pending_review','pending')\nAND client_id = '{{ $json.appt.client_id }}'\nAND appointment_id != '{{ $json.appt.lookup_id }}'\nAND confirmed_time IS NOT NULL AND end_time IS NOT NULL\nAND (confirmed_time, end_time) OVERLAPS (\n  '{{ $json.appt.requested_time }}'::timestamptz,\n  '{{ $json.appt.end_time }}'::timestamptz\n){{ $json.appt.assigned_staff ? \" AND assigned_staff = '\" + $json.appt.assigned_staff + \"'\" : \"\" }}",
+        "options": {}
+      },
+      "credentials": {
+        "postgres": {
+          "id": "MMScP2tKEgzvhkYM",
+          "name": "Postgres account"
+        }
+      },
+      "continueOnFail": true
+    },
+    {
+      "id": "n_proc_reschedule",
+      "name": "Process Reschedule",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1780,
+        380
+      ],
+      "parameters": {
+        "jsCode": "const pgRow = $input.first().json;\nconst apptData = $('Build Reschedule').first().json;\nconst appt = { ...apptData.appt };\nappt.flags = Array.isArray(appt.flags) ? [...appt.flags] : [];\n\nconst conflicts = parseInt(pgRow.conflict_count || pgRow[0]?.conflict_count || 0);\nif (conflicts > 0) {\n  appt.status = 'conflict';\n  appt.conflict_detected = true;\n  appt.flags.push('reschedule_slot_unavailable');\n  appt.processed_at = new Date().toISOString();\n} else {\n  appt.confirmed_time = appt.requested_time;\n  appt.status = 'rescheduled';\n  appt.processed_at = new Date().toISOString();\n  appt.flags.push('reschedule_ok');\n}\nreturn [{ json: { appt, raw_payload: apptData.raw_payload } }];"
+      }
+    },
+    {
+      "id": "n_apply_reschedule",
+      "name": "Apply Reschedule",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        2000,
+        380
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE appointment_log\nSET confirmed_time = {{ $json.appt.status === 'rescheduled' ? \"'\" + $json.appt.confirmed_time + \"'::timestamptz\" : 'confirmed_time' }},\n    end_time       = {{ $json.appt.status === 'rescheduled' ? \"'\" + $json.appt.end_time + \"'::timestamptz\" : 'end_time' }},\n    status         = '{{ $json.appt.status }}',\n    notes          = COALESCE(notes,'') || '{{ $json.appt.status === \"rescheduled\" ? \" | Rescheduled \" + $json.appt.processed_at : \" | Reschedule conflict \" + $json.appt.processed_at }}',\n    processed_at   = NOW()\nWHERE appointment_id = '{{ $json.appt.lookup_id }}'\nAND   client_id      = '{{ $json.appt.client_id }}'\nRETURNING appointment_id, status, contact_email, contact_name, confirmed_time",
+        "options": {}
+      },
+      "credentials": {
+        "postgres": {
+          "id": "MMScP2tKEgzvhkYM",
+          "name": "Postgres account"
+        }
+      },
+      "continueOnFail": true
+    },
+    {
+      "id": "n_email_reschedule",
+      "name": "Send Reschedule Email",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2,
+      "position": [
+        2220,
+        380
+      ],
+      "parameters": {
+        "sendTo": "={{ $json.appt.contact_email }}",
+        "subject": "={{ $json.appt.status === 'rescheduled' ? 'Appointment Rescheduled — ' + ($json.appt.service_type || 'Appointment') : 'Reschedule Request — Time Slot Unavailable' }}",
+        "emailType": "html",
+        "message": "={{ $json.appt.status === 'rescheduled' ? '<h2 style=\"color:#2d6a4f\">Appointment Rescheduled</h2><p>Your appointment has been moved to <b>' + new Date($json.appt.confirmed_time).toLocaleString('en-US', {timeZone:$json.appt.timezone||'UTC'}) + '</b>.</p><p>Reference: <code>' + $json.appt.appointment_id + '</code></p>' : '<h2>New Time Slot Unavailable</h2><p>The new time you requested is not available. Your original appointment remains unchanged.</p><p>Reference: <code>' + ($json.appt.previous_appointment_id || $json.appt.appointment_id) + '</code></p>' }}",
+        "options": {}
+      },
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "bHMHyGqUtDInnHet",
+          "name": "Gmail account"
+        }
+      },
+      "continueOnFail": true,
+      "webhookId": "2b3ae6fc-8184-4397-ba2d-937aec16132a"
+    },
+    {
+      "id": "n_build_cancel",
+      "name": "Build Cancellation",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1340,
+        540
+      ],
+      "parameters": {
+        "jsCode": "const data = $input.first().json;\nconst appt = { ...data.appt };\nappt.flags = Array.isArray(appt.flags) ? [...appt.flags] : [];\nconst errors = [];\n\nif (!appt.appointment_id) errors.push('appointment_id is required');\nif (!appt.contact_email)  errors.push('contact_email required to verify identity');\n\nif (errors.length > 0) {\n  appt.validation_passed = false;\n  appt.validation_errors = errors;\n  appt.status = 'rejected';\n} else {\n  appt.validation_passed = true;\n  appt.status = 'cancelled';\n  appt.processed_at = new Date().toISOString();\n}\nreturn [{ json: { appt, raw_payload: data.raw_payload } }];"
+      }
+    },
+    {
+      "id": "n_apply_cancel",
+      "name": "Apply Cancellation",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1560,
+        540
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE appointment_log\nSET status       = 'cancelled',\n    cancel_reason = {{ $json.appt.cancel_reason ? \"'\" + $json.appt.cancel_reason.replace(/'/g,\"''\") + \"'\" : 'NULL' }},\n    processed_at = NOW()\nWHERE appointment_id = '{{ $json.appt.appointment_id }}'\nAND   client_id      = '{{ $json.appt.client_id }}'\nRETURNING appointment_id, status, contact_email, contact_name",
+        "options": {}
+      },
+      "credentials": {
+        "postgres": {
+          "id": "MMScP2tKEgzvhkYM",
+          "name": "Postgres account"
+        }
+      },
+      "continueOnFail": true
+    },
+    {
+      "id": "n_email_cancel",
+      "name": "Send Cancellation Email",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2,
+      "position": [
+        1780,
+        540
+      ],
+      "parameters": {
+        "sendTo": "={{ $json.appt.contact_email }}",
+        "subject": "={{ 'Appointment Cancelled — ' + ($json.appt.service_type || 'Appointment') }}",
+        "emailType": "html",
+        "message": "={{ '<h2>Appointment Cancelled</h2><p>Your appointment has been cancelled.</p>' + ($json.appt.cancel_reason ? '<p><b>Reason:</b> ' + $json.appt.cancel_reason + '</p>' : '') + '<p>Reference ID: <code>' + $json.appt.appointment_id + '</code></p><p>To rebook, simply reply to this email or submit a new booking request.</p>' }}",
+        "options": {}
+      },
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "bHMHyGqUtDInnHet",
+          "name": "Gmail account"
+        }
+      },
+      "continueOnFail": true,
+      "webhookId": "b6761e24-2f2c-4a60-9c65-bd5eb644135e"
+    },
+    {
+      "id": "n_prep_log",
+      "name": "Prepare Log Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3380,
+        200
+      ],
+      "parameters": {
+        "jsCode": "// Try each source node in priority order — whichever path ran has valid appt.appointment_id\nconst sources = ['Confirm Appointment','Queue for Review','Handle Conflict',\n  'Process Reschedule','Build Cancellation','Parse Ollama Intent','Classify Intent'];\nlet appt = {}, raw = {};\nfor (const src of sources) {\n  try {\n    const d = $(src).first().json;\n    if (d && d.appt && d.appt.appointment_id) { appt = d.appt; raw = d.raw_payload || {}; break; }\n  } catch(e) {}\n}\n\nreturn [{\n  json: {\n    appointment_id:          appt.appointment_id || 'unknown',\n    execution_id:            appt.execution_id || null,\n    workflow_version:        appt.workflow_version || 'appointment_scheduling_v1',\n    client_id:               appt.client_id || 'default',\n    request_type:            appt.intent || appt.request_type || null,\n    source_type:             appt.source_type || null,\n    source_channel:          appt.source_channel || null,\n    contact_name:            appt.contact_name || null,\n    contact_email:           appt.contact_email || null,\n    contact_phone:           appt.contact_phone || null,\n    service_type:            appt.service_type || null,\n    appointment_type:        appt.appointment_type || null,\n    requested_time:          appt.requested_time || null,\n    confirmed_time:          appt.confirmed_time || appt.requested_time || null,\n    end_time:                appt.end_time || null,\n    timezone:                appt.timezone || 'UTC',\n    duration_minutes:        appt.duration_minutes || 60,\n    buffer_before_minutes:   appt.buffer_before_minutes || 0,\n    buffer_after_minutes:    appt.buffer_after_minutes || 15,\n    assigned_staff:          appt.assigned_staff || null,\n    calendar_target:         appt.calendar_target || null,\n    location_or_link:        appt.location_or_link || null,\n    status:                  appt.status || 'unknown',\n    urgency_level:           appt.urgency_level || 'normal',\n    raw_payload:             JSON.stringify(raw),\n    normalized_payload:      JSON.stringify(appt),\n    scheduling_decision:     JSON.stringify(appt.scheduling_decision || {}),\n    availability_checked:    appt.availability_checked || false,\n    conflict_detected:       appt.conflict_detected || false,\n    auto_confirmed:          appt.auto_confirmed || false,\n    reminder_sequence:       JSON.stringify(appt.reminder_sequence || []),\n    intent_detected:         appt.intent || null,\n    ai_model_used:           appt.ai_model_used || null,\n    ai_model_source:         appt.ai_model_source || 'none',\n    ai_response_time_ms:     appt.ai_response_time_ms || 0,\n    ai_fallback_used:        appt.ai_fallback_used || false,\n    previous_appointment_id: appt.previous_appointment_id || null,\n    cancel_reason:           appt.cancel_reason || null,\n    validation_passed:       appt.validation_passed !== false,\n    validation_errors:       JSON.stringify(appt.validation_errors || []),\n    notes:                   appt.notes ? appt.notes.substring(0, 2000) : null,\n    error_message:           appt.error_message || null,\n    alternatives:            JSON.stringify(appt.alternatives || []),\n    received_at:             appt.received_at || new Date().toISOString(),\n    processed_at:            appt.processed_at || new Date().toISOString()\n  }\n}];"
+      }
+    },
+    {
+      "id": "n_log_pg",
+      "name": "Log to PostgreSQL",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        3600,
+        200
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO appointment_log (\n  appointment_id, execution_id, workflow_version, client_id,\n  request_type, source_type, source_channel,\n  contact_name, contact_email, contact_phone,\n  service_type, appointment_type,\n  requested_time, confirmed_time, end_time, timezone,\n  duration_minutes, buffer_before_minutes, buffer_after_minutes,\n  assigned_staff, calendar_target, location_or_link,\n  status, urgency_level,\n  raw_payload, normalized_payload, scheduling_decision,\n  availability_checked, conflict_detected, auto_confirmed,\n  reminder_sequence,\n  intent_detected, ai_model_used, ai_model_source, ai_response_time_ms, ai_fallback_used,\n  previous_appointment_id, cancel_reason,\n  validation_passed, validation_errors, notes, error_message,\n  received_at, processed_at\n) VALUES (\n  '{{ $json.appointment_id }}',\n  {{ $json.execution_id ? \"'\" + $json.execution_id + \"'\" : 'NULL' }},\n  '{{ $json.workflow_version }}',\n  '{{ $json.client_id }}',\n  {{ $json.request_type ? \"'\" + $json.request_type + \"'\" : 'NULL' }},\n  {{ $json.source_type ? \"'\" + $json.source_type + \"'\" : 'NULL' }},\n  {{ $json.source_channel ? \"'\" + $json.source_channel + \"'\" : 'NULL' }},\n  {{ $json.contact_name ? \"'\" + $json.contact_name.replace(/'/g,\"''\") + \"'\" : 'NULL' }},\n  {{ $json.contact_email ? \"'\" + $json.contact_email + \"'\" : 'NULL' }},\n  {{ $json.contact_phone ? \"'\" + $json.contact_phone + \"'\" : 'NULL' }},\n  {{ $json.service_type ? \"'\" + $json.service_type + \"'\" : 'NULL' }},\n  {{ $json.appointment_type ? \"'\" + $json.appointment_type + \"'\" : 'NULL' }},\n  {{ $json.requested_time ? \"'\" + $json.requested_time + \"'\" : 'NULL' }}::timestamptz,\n  {{ $json.confirmed_time ? \"'\" + $json.confirmed_time + \"'\" : 'NULL' }}::timestamptz,\n  {{ $json.end_time ? \"'\" + $json.end_time + \"'\" : 'NULL' }}::timestamptz,\n  '{{ $json.timezone || \"UTC\" }}',\n  {{ $json.duration_minutes || 60 }},\n  {{ $json.buffer_before_minutes || 0 }},\n  {{ $json.buffer_after_minutes || 15 }},\n  {{ $json.assigned_staff ? \"'\" + $json.assigned_staff + \"'\" : 'NULL' }},\n  {{ $json.calendar_target ? \"'\" + $json.calendar_target + \"'\" : 'NULL' }},\n  {{ $json.location_or_link ? \"'\" + $json.location_or_link.replace(/'/g,\"''\") + \"'\" : 'NULL' }},\n  '{{ $json.status || \"unknown\" }}',\n  '{{ $json.urgency_level || \"normal\" }}',\n  '{{ $json.raw_payload.replace(/'/g,\"''\") }}'::jsonb,\n  '{{ $json.normalized_payload.replace(/'/g,\"''\") }}'::jsonb,\n  '{{ $json.scheduling_decision.replace(/'/g,\"''\") }}'::jsonb,\n  {{ $json.availability_checked }},\n  {{ $json.conflict_detected }},\n  {{ $json.auto_confirmed }},\n  '{{ $json.reminder_sequence }}'::jsonb,\n  {{ $json.intent_detected ? \"'\" + $json.intent_detected + \"'\" : 'NULL' }},\n  {{ $json.ai_model_used ? \"'\" + $json.ai_model_used + \"'\" : 'NULL' }},\n  '{{ $json.ai_model_source || \"none\" }}',\n  {{ $json.ai_response_time_ms || 0 }},\n  {{ $json.ai_fallback_used }},\n  {{ $json.previous_appointment_id ? \"'\" + $json.previous_appointment_id + \"'\" : 'NULL' }},\n  {{ $json.cancel_reason ? \"'\" + $json.cancel_reason.replace(/'/g,\"''\") + \"'\" : 'NULL' }},\n  {{ $json.validation_passed }},\n  '{{ $json.validation_errors }}'::jsonb,\n  {{ $json.notes ? \"'\" + $json.notes.replace(/'/g,\"''\") + \"'\" : 'NULL' }},\n  {{ $json.error_message ? \"'\" + $json.error_message.replace(/'/g,\"''\") + \"'\" : 'NULL' }},\n  '{{ $json.received_at }}'::timestamptz,\n  '{{ $json.processed_at }}'::timestamptz\n)\nON CONFLICT (appointment_id) DO UPDATE SET\n  status             = EXCLUDED.status,\n  confirmed_time     = EXCLUDED.confirmed_time,\n  end_time           = EXCLUDED.end_time,\n  scheduling_decision= EXCLUDED.scheduling_decision,\n  availability_checked=EXCLUDED.availability_checked,\n  conflict_detected  = EXCLUDED.conflict_detected,\n  auto_confirmed     = EXCLUDED.auto_confirmed,\n  reminder_sequence  = EXCLUDED.reminder_sequence,\n  ai_model_used      = EXCLUDED.ai_model_used,\n  ai_fallback_used   = EXCLUDED.ai_fallback_used,\n  processed_at       = EXCLUDED.processed_at\nRETURNING appointment_id, status, confirmed_time",
+        "options": {}
+      },
+      "credentials": {
+        "postgres": {
+          "id": "MMScP2tKEgzvhkYM",
+          "name": "Postgres account"
+        }
+      },
+      "continueOnFail": true
+    },
+    {
+      "id": "n_respond",
+      "name": "Webhook Response",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        3820,
+        200
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ (() => { const d = $('Prepare Log Data').first().json; const base = { appointment_id: d.appointment_id, status: d.status, service_type: d.service_type, contact_email: d.contact_email, processed_at: d.processed_at }; if (d.status === 'confirmed') return { ...base, confirmed_time: d.confirmed_time, duration_minutes: d.duration_minutes, location_or_link: d.location_or_link, message: 'Appointment confirmed.' }; if (d.status === 'pending_review') return { ...base, requested_time: d.requested_time, message: 'Request received — awaiting staff confirmation.' }; if (d.status === 'conflict') return { ...base, requested_time: d.requested_time, alternatives: JSON.parse(d.alternatives || '[]'), message: 'Requested slot unavailable — see alternatives.' }; if (d.status === 'rescheduled') return { ...base, confirmed_time: d.confirmed_time, message: 'Appointment rescheduled.' }; if (d.status === 'cancelled') return { ...base, message: 'Appointment cancelled.' }; if (d.status === 'inquiry') return { ...base, message: 'Inquiry received.' }; return { ...base, message: 'Request processed.' }; })() }}",
+        "options": {
+          "responseCode": 200
+        }
+      }
+    },
+    {
+      "id": "n_error",
+      "name": "Error Handler",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        600
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "n_error_log",
+      "name": "Log Workflow Error",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        220,
+        600
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO workflow_errors (execution_id, workflow_id, error_type, error_message, failed_at, retry_count, resolved) VALUES ('{{ $json.execution.id }}', 'appointment_scheduling_v1', 'fatal', '{{ ($json.error.message || \"Unknown\").replace(/'/g,\"''\") }}', NOW(), 0, false);",
+        "options": {}
+      },
+      "credentials": {
+        "postgres": {
+          "id": "MMScP2tKEgzvhkYM",
+          "name": "Postgres account"
+        }
+      },
+      "continueOnFail": true
+    }
+  ],
+  "connections": {
+    "Appointment Webhook": {
+      "main": [
+        [
+          {
+            "node": "Normalize Appointment",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Appointment": {
+      "main": [
+        [
+          {
+            "node": "Classify Intent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Classify Intent": {
+      "main": [
+        [
+          {
+            "node": "Ollama Intent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ollama Intent": {
+      "main": [
+        [
+          {
+            "node": "Parse Ollama Intent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Ollama Intent": {
+      "main": [
+        [
+          {
+            "node": "Intent Router",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Intent Router": {
+      "main": [
+        [
+          {
+            "node": "Validate Booking",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Reschedule",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Cancellation",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Prepare Log Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Booking": {
+      "main": [
+        [
+          {
+            "node": "Validation Gate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validation Gate": {
+      "main": [
+        [
+          {
+            "node": "Check Availability",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Validation Fail Response",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Log Validation Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Availability": {
+      "main": [
+        [
+          {
+            "node": "Process Availability",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process Availability": {
+      "main": [
+        [
+          {
+            "node": "Availability Gate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Availability Gate": {
+      "main": [
+        [
+          {
+            "node": "Build Booking Decision",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Handle Conflict",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Booking Decision": {
+      "main": [
+        [
+          {
+            "node": "Auto-Confirm Gate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Auto-Confirm Gate": {
+      "main": [
+        [
+          {
+            "node": "Confirm Appointment",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Queue for Review",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Confirm Appointment": {
+      "main": [
+        [
+          {
+            "node": "Send Confirmation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Confirmation": {
+      "main": [
+        [
+          {
+            "node": "Prepare Log Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Queue for Review": {
+      "main": [
+        [
+          {
+            "node": "Notify Staff",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Notify Staff": {
+      "main": [
+        [
+          {
+            "node": "Prepare Log Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Handle Conflict": {
+      "main": [
+        [
+          {
+            "node": "Send Conflict Notice",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Conflict Notice": {
+      "main": [
+        [
+          {
+            "node": "Prepare Log Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Reschedule": {
+      "main": [
+        [
+          {
+            "node": "Check New Slot",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check New Slot": {
+      "main": [
+        [
+          {
+            "node": "Process Reschedule",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process Reschedule": {
+      "main": [
+        [
+          {
+            "node": "Apply Reschedule",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Apply Reschedule": {
+      "main": [
+        [
+          {
+            "node": "Send Reschedule Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Reschedule Email": {
+      "main": [
+        [
+          {
+            "node": "Prepare Log Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Cancellation": {
+      "main": [
+        [
+          {
+            "node": "Apply Cancellation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Apply Cancellation": {
+      "main": [
+        [
+          {
+            "node": "Send Cancellation Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Cancellation Email": {
+      "main": [
+        [
+          {
+            "node": "Prepare Log Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Log Data": {
+      "main": [
+        [
+          {
+            "node": "Log to PostgreSQL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log to PostgreSQL": {
+      "main": [
+        [
+          {
+            "node": "Webhook Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Error Handler": {
+      "main": [
+        [
+          {
+            "node": "Log Workflow Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true
+  },
+  "staticData": null,
+  "meta": null,
+  "pinData": null,
+  "versionId": "6e268039-4d82-40bd-bd91-5b88fdeda1b5",
+  "activeVersionId": "6e268039-4d82-40bd-bd91-5b88fdeda1b5",
+  "versionCounter": 10,
+  "triggerCount": 1,
+  "shared": [
+    {
+      "updatedAt": "2026-05-11T17:52:57.442Z",
+      "createdAt": "2026-05-11T17:52:57.442Z",
+      "role": "workflow:owner",
+      "workflowId": "muVXGTx7suWyjaiT",
+      "projectId": "JoreHGuW1LeJlJ1H",
+      "project": {
+        "updatedAt": "2026-05-09T02:54:50.805Z",
+        "createdAt": "2026-05-09T02:42:23.471Z",
+        "id": "JoreHGuW1LeJlJ1H",
+        "name": "Alan Coronado <qadautomation@gmail.com>",
+        "type": "personal",
+        "icon": null,
+        "description": null,
+        "creatorId": "57aa1325-f836-4f8b-a964-640862e141f6"
+      }
+    }
+  ],
+  "tags": [],
+  "activeVersion": {
+    "updatedAt": "2026-05-11T18:16:42.982Z",
+    "createdAt": "2026-05-11T18:16:42.982Z",
+    "versionId": "6e268039-4d82-40bd-bd91-5b88fdeda1b5",
+    "workflowId": "muVXGTx7suWyjaiT",
+    "nodes": [
+      {
+        "id": "n_webhook",
+        "name": "Appointment Webhook",
+        "type": "n8n-nodes-base.webhook",
+        "typeVersion": 2,
+        "position": [
+          0,
+          300
+        ],
+        "parameters": {
+          "httpMethod": "POST",
+          "path": "appointment",
+          "responseMode": "responseNode",
+          "options": {}
+        },
+        "webhookId": "3aebc682-d090-4416-b4cb-c83527800cf5"
+      },
+      {
+        "id": "n_normalize",
+        "name": "Normalize Appointment",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          220,
+          300
+        ],
+        "parameters": {
+          "jsCode": "const raw = $input.first().json.body || $input.first().json;\nconst CONFIG = {\"business_hours\":{\"mon\":{\"open\":\"08:00\",\"close\":\"18:00\"},\"tue\":{\"open\":\"08:00\",\"close\":\"18:00\"},\"wed\":{\"open\":\"08:00\",\"close\":\"18:00\"},\"thu\":{\"open\":\"08:00\",\"close\":\"18:00\"},\"fri\":{\"open\":\"08:00\",\"close\":\"17:00\"},\"sat\":{\"open\":\"09:00\",\"close\":\"13:00\"},\"sun\":null},\"service_durations\":{\"consultation\":30,\"initial_visit\":60,\"follow_up\":15,\"showing\":45,\"assessment\":90,\"checkup\":30,\"default\":60},\"buffer_after_minutes\":15,\"min_advance_hours\":2,\"max_advance_days\":90,\"auto_confirm_sources\":[\"internal\",\"crm\",\"staff\"],\"urgent_review_required\":true};\nconst now = new Date().toISOString();\nconst apptId = 'appt_' + Date.now() + '_' + Math.random().toString(36).substr(2,9);\nconst execId = $execution?.id || 'exec_' + Date.now();\n\nconst srcType = raw.source_type || (\n  raw.form_id ? 'form' : raw.widget_id ? 'widget' :\n  raw.email_thread ? 'email' : raw.crm_id ? 'crm' : 'api'\n);\n\nconst svcType = (raw.service_type || 'default').toLowerCase();\nconst durationMin = parseInt(raw.duration_minutes) ||\n  CONFIG.service_durations[svcType] || CONFIG.service_durations.default || 60;\nconst bufferAfter = raw.buffer_after_minutes !== undefined ? parseInt(raw.buffer_after_minutes) : CONFIG.buffer_after_minutes;\nconst bufferBefore = parseInt(raw.buffer_before_minutes) || 0;\n\nlet requestedTime = null, endTime = null;\ntry {\n  if (raw.requested_time) {\n    requestedTime = new Date(raw.requested_time).toISOString();\n    endTime = new Date(new Date(requestedTime).getTime() + (durationMin + bufferAfter) * 60000).toISOString();\n  }\n} catch(e) {}\n\nconst appt = {\n  appointment_id: raw.appointment_id || apptId,\n  execution_id: execId,\n  workflow_version: 'appointment_scheduling_v1',\n  client_id: raw.client_id || 'default',\n\n  request_type: raw.request_type || null,\n  source_type: srcType,\n  source_channel: raw.source_channel || null,\n\n  contact_name: raw.contact_name || raw.name || null,\n  contact_email: (raw.contact_email || raw.email || '').toLowerCase().trim() || null,\n  contact_phone: raw.contact_phone || raw.phone || null,\n\n  service_type: svcType,\n  appointment_type: raw.appointment_type || raw.type || null,\n\n  requested_time: requestedTime,\n  confirmed_time: null,\n  end_time: endTime,\n  timezone: raw.timezone || 'UTC',\n  duration_minutes: durationMin,\n  buffer_before_minutes: bufferBefore,\n  buffer_after_minutes: bufferAfter,\n\n  assigned_staff: raw.assigned_staff || raw.staff || null,\n  calendar_target: raw.calendar_target || 'default',\n  location_or_link: raw.location || raw.meeting_link || raw.address || null,\n\n  status: 'pending',\n  urgency_level: (raw.urgency_level || raw.urgency || 'normal').toLowerCase(),\n\n  notes: raw.notes || raw.message || raw.description || null,\n  consent_flags: raw.consent_flags || {},\n  metadata: raw.metadata || {},\n\n  // Will be set by downstream nodes\n  intent: null, intent_confidence: 0, intent_source: null,\n  availability_checked: false, conflict_detected: false, conflict_details: null,\n  alternatives: [], auto_confirmed: false, scheduling_decision: {},\n  validation_passed: null, validation_errors: [],\n  reminder_sequence: [],\n  previous_appointment_id: raw.previous_appointment_id || raw.original_id || null,\n  cancel_reason: raw.cancel_reason || null,\n  ai_model_used: null, ai_model_source: null, ai_response_time_ms: 0, ai_fallback_used: false,\n  error_message: null, flags: [],\n  received_at: now, processed_at: null,\n  _config: CONFIG\n};\n\nreturn [{ json: { appt, raw_payload: raw } }];"
+        }
+      },
+      {
+        "id": "n_classify",
+        "name": "Classify Intent",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          440,
+          300
+        ],
+        "parameters": {
+          "jsCode": "const data = $input.first().json;\nconst appt = { ...data.appt };\nappt.flags = Array.isArray(appt.flags) ? [...appt.flags] : [];\n\nconst validIntents = ['book', 'reschedule', 'cancel', 'inquiry'];\n\n// Honour explicit request_type from caller — highest priority\nif (appt.request_type && validIntents.includes(appt.request_type.toLowerCase())) {\n  appt.intent = appt.request_type.toLowerCase();\n  appt.intent_confidence = 1.0;\n  appt.intent_source = 'explicit';\n  return [{ json: { appt, raw_payload: data.raw_payload } }];\n}\n\n// Keyword scan across notes + subject + service type\nconst txt = ((appt.notes || '') + ' ' + (appt.service_type || '') + ' ' + (appt.appointment_type || '')).toLowerCase();\n\nlet intent = null, confidence = 0;\nif (/\\b(cancel|cancell|can't make|no longer need|want to cancel|remove my|delete my)/.test(txt)) {\n  intent = 'cancel'; confidence = 0.90;\n} else if (/\\b(reschedul|move|postpone|push back|change.*time|different (day|time)|new time|can we move|need to move)/.test(txt)) {\n  intent = 'reschedule'; confidence = 0.88;\n} else if (/\\b(book|schedule|appointment|reserve|set up|need.*appt|make.*appt|sign up|register)/.test(txt)) {\n  intent = 'book'; confidence = 0.85;\n} else if (/\\b(available|availability|open slot|when.*open|check|do you have|what time)/.test(txt)) {\n  intent = 'inquiry'; confidence = 0.80;\n} else if (appt.requested_time) {\n  intent = 'book'; confidence = 0.55;  // has a time = probably booking\n} else {\n  intent = null; confidence = 0;\n}\n\nappt.intent = intent;\nappt.intent_confidence = confidence;\nappt.intent_source = 'keyword';\nreturn [{ json: { appt, raw_payload: data.raw_payload } }];"
+        }
+      },
+      {
+        "id": "n_ollama_intent",
+        "name": "Ollama Intent",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [
+          660,
+          300
+        ],
+        "parameters": {
+          "method": "POST",
+          "url": "http://host.docker.internal:11434/api/generate",
+          "sendHeaders": true,
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "Content-Type",
+                "value": "application/json"
+              }
+            ]
+          },
+          "sendBody": true,
+          "contentType": "raw",
+          "rawContentType": "application/json",
+          "body": "{\n  \"model\": \"llama3.2\",\n  \"prompt\": \"You are a scheduling assistant. Classify the intent of this message into one of: book, reschedule, cancel, inquiry.\\n\\nMessage: {{ ($json.appt.notes || $json.appt.appointment_type || 'no message provided').substring(0, 500) }}\\n\\nReturn ONLY this JSON (no explanation):\\n{\\\"intent\\\": \\\"book\\\", \\\"confidence\\\": 0.85, \\\"reason\\\": \\\"brief reason\\\"}\",\n  \"stream\": false,\n  \"format\": \"json\"\n}",
+          "options": {
+            "timeout": 30000
+          }
+        },
+        "continueOnFail": true
+      },
+      {
+        "id": "n_parse_intent",
+        "name": "Parse Ollama Intent",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          880,
+          300
+        ],
+        "parameters": {
+          "jsCode": "const ollamaData = $input.first().json;\nconst prevData = $('Classify Intent').first().json;\nconst appt = { ...prevData.appt };\nappt.flags = Array.isArray(appt.flags) ? [...appt.flags] : [];\nconst validIntents = ['book', 'reschedule', 'cancel', 'inquiry'];\n\n// If intent was already set with high confidence (explicit or clear keyword), skip AI\nif (appt.intent_confidence >= 0.85) {\n  return [{ json: { appt, raw_payload: prevData.raw_payload } }];\n}\n\ntry {\n  const ollamaRaw = ollamaData.response || null;\n  if (!ollamaRaw || ollamaData.error) throw new Error('Ollama unavailable');\n  const parsed = typeof ollamaRaw === 'string' ? JSON.parse(ollamaRaw) : ollamaRaw;\n  const aiIntent = (parsed.intent || '').toLowerCase().trim();\n  const aiConf = Math.min(1, Math.max(0, typeof parsed.confidence === 'number' ? parsed.confidence : parseFloat(parsed.confidence) || 0));\n\n  if (validIntents.includes(aiIntent)) {\n    if (appt.intent === aiIntent) {\n      appt.intent_confidence = Math.min(1, appt.intent_confidence + 0.08);\n      appt.intent_source = 'keyword+ai_consensus';\n    } else {\n      appt.intent = aiIntent;\n      appt.intent_confidence = aiConf;\n      appt.intent_source = 'ai_resolved';\n    }\n    appt.ai_model_used = 'llama3.2';\n    appt.ai_model_source = 'ollama_local';\n    appt.ai_fallback_used = false;\n  }\n} catch(e) {\n  appt.flags.push('ai_intent_fallback');\n  appt.ai_fallback_used = true;\n  appt.ai_model_source = 'fallback';\n}\n\n// Final fallback — default to 'book' if still unresolved\nif (!appt.intent || !validIntents.includes(appt.intent)) {\n  appt.intent = appt.requested_time ? 'book' : 'inquiry';\n  appt.intent_confidence = 0.40;\n  appt.intent_source = 'default_fallback';\n  appt.flags.push('intent_fallback');\n}\n\nreturn [{ json: { appt, raw_payload: prevData.raw_payload } }];"
+        }
+      },
+      {
+        "id": "n_router",
+        "name": "Intent Router",
+        "type": "n8n-nodes-base.switch",
+        "typeVersion": 3,
+        "position": [
+          1100,
+          300
+        ],
+        "parameters": {
+          "mode": "rules",
+          "rules": {
+            "values": [
+              {
+                "conditions": {
+                  "options": {
+                    "caseSensitive": false,
+                    "leftValue": "",
+                    "typeValidation": "loose"
+                  },
+                  "conditions": [
+                    {
+                      "leftValue": "={{ $json.appt.intent }}",
+                      "rightValue": "book",
+                      "operator": {
+                        "type": "string",
+                        "operation": "equals"
+                      }
+                    }
+                  ],
+                  "combinator": "and"
+                },
+                "renameOutput": true,
+                "outputKey": "book"
+              },
+              {
+                "conditions": {
+                  "options": {
+                    "caseSensitive": false,
+                    "leftValue": "",
+                    "typeValidation": "loose"
+                  },
+                  "conditions": [
+                    {
+                      "leftValue": "={{ $json.appt.intent }}",
+                      "rightValue": "reschedule",
+                      "operator": {
+                        "type": "string",
+                        "operation": "equals"
+                      }
+                    }
+                  ],
+                  "combinator": "and"
+                },
+                "renameOutput": true,
+                "outputKey": "reschedule"
+              },
+              {
+                "conditions": {
+                  "options": {
+                    "caseSensitive": false,
+                    "leftValue": "",
+                    "typeValidation": "loose"
+                  },
+                  "conditions": [
+                    {
+                      "leftValue": "={{ $json.appt.intent }}",
+                      "rightValue": "cancel",
+                      "operator": {
+                        "type": "string",
+                        "operation": "equals"
+                      }
+                    }
+                  ],
+                  "combinator": "and"
+                },
+                "renameOutput": true,
+                "outputKey": "cancel"
+              }
+            ]
+          },
+          "fallbackOutput": "extra"
+        }
+      },
+      {
+        "id": "n_validate",
+        "name": "Validate Booking",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          1340,
+          120
+        ],
+        "parameters": {
+          "jsCode": "const data = $input.first().json;\nconst appt = { ...data.appt };\nappt.flags = Array.isArray(appt.flags) ? [...appt.flags] : [];\nconst errors = [];\nconst warnings = [];\nconst CONFIG = appt._config || {};\n\nconst isInquiry = appt.intent === 'inquiry';\n\nif (!appt.contact_email) errors.push('contact_email is required');\n\n// requested_time required for book/reschedule/cancel — optional for inquiry\nif (!appt.requested_time && !isInquiry) {\n  errors.push('requested_time is required — format: ISO 8601 e.g. 2026-05-15T14:00:00Z');\n}\n\nif (appt.requested_time) {\n  const reqMs = new Date(appt.requested_time).getTime();\n  const minMs = Date.now() + (CONFIG.min_advance_hours || 2) * 3600000;\n  const maxMs = Date.now() + (CONFIG.max_advance_days || 90) * 86400000;\n  if (reqMs < minMs) errors.push('Must book at least ' + (CONFIG.min_advance_hours || 2) + ' hours in advance');\n  if (reqMs > maxMs) errors.push('Cannot book more than ' + (CONFIG.max_advance_days || 90) + ' days out');\n\n  // Business hours: soft flag only — outside hours routes to pending_review, not rejection\n  const days = ['sun','mon','tue','wed','thu','fri','sat'];\n  const bh = CONFIG.business_hours || {};\n  const reqDate = new Date(appt.requested_time);\n  const dayKey = days[reqDate.getUTCDay()];\n  const dayHours = bh[dayKey];\n  if (dayHours === null || dayHours === undefined) {\n    warnings.push('Requested day is outside standard business days');\n    appt.flags.push('outside_business_hours');\n  } else if (dayHours) {\n    const reqHr = reqDate.getUTCHours() + reqDate.getUTCMinutes() / 60;\n    const [oh, om] = dayHours.open.split(':').map(Number);\n    const [ch, cm] = dayHours.close.split(':').map(Number);\n    if (reqHr < oh + om/60 || reqHr >= ch + cm/60) {\n      warnings.push('Requested time is outside standard business hours (' + dayHours.open + '-' + dayHours.close + ' UTC)');\n      appt.flags.push('outside_business_hours');\n    }\n  }\n}\n\nif (appt.urgency_level === 'urgent') appt.flags.push('urgent_request');\n\nif (errors.length > 0) {\n  appt.validation_passed = false;\n  appt.validation_errors = errors;\n  appt.status = 'rejected';\n} else {\n  appt.validation_passed = true;\n  appt.validation_warnings = warnings;\n}\nreturn [{ json: { appt, raw_payload: data.raw_payload } }];"
+        }
+      },
+      {
+        "id": "n_val_gate",
+        "name": "Validation Gate",
+        "type": "n8n-nodes-base.if",
+        "typeVersion": 2,
+        "position": [
+          1560,
+          120
+        ],
+        "parameters": {
+          "conditions": {
+            "options": {
+              "caseSensitive": true,
+              "leftValue": "",
+              "typeValidation": "strict"
+            },
+            "conditions": [
+              {
+                "leftValue": "={{ $json.appt.validation_passed }}",
+                "rightValue": true,
+                "operator": {
+                  "type": "boolean",
+                  "operation": "equals"
+                }
+              }
+            ],
+            "combinator": "and"
+          }
+        }
+      },
+      {
+        "id": "n_check_avail",
+        "name": "Check Availability",
+        "type": "n8n-nodes-base.postgres",
+        "typeVersion": 2.5,
+        "position": [
+          1780,
+          60
+        ],
+        "parameters": {
+          "operation": "executeQuery",
+          "query": "SELECT\n  COUNT(*) AS conflict_count,\n  COALESCE(STRING_AGG(\n    appointment_id || ':' || COALESCE(contact_name,'Unknown') || ':' || COALESCE(confirmed_time::text,''),\n    ' | '\n  ), '') AS conflict_details\nFROM appointment_log\nWHERE status IN ('confirmed','pending_review','pending')\nAND client_id = '{{ $json.appt.client_id }}'\nAND confirmed_time IS NOT NULL\nAND end_time IS NOT NULL\nAND (confirmed_time, end_time) OVERLAPS (\n  '{{ $json.appt.requested_time }}'::timestamptz,\n  '{{ $json.appt.end_time }}'::timestamptz\n){{ $json.appt.assigned_staff ? \" AND assigned_staff = '\" + $json.appt.assigned_staff + \"'\" : \"\" }}",
+          "options": {}
+        },
+        "credentials": {
+          "postgres": {
+            "id": "MMScP2tKEgzvhkYM",
+            "name": "Postgres account"
+          }
+        },
+        "continueOnFail": true
+      },
+      {
+        "id": "n_proc_avail",
+        "name": "Process Availability",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          2000,
+          60
+        ],
+        "parameters": {
+          "jsCode": "const pgRow = $input.first().json;\nconst apptData = $('Validate Booking').first().json;\nconst appt = { ...apptData.appt };\nappt.flags = Array.isArray(appt.flags) ? [...appt.flags] : [];\n\nconst conflicts = parseInt(pgRow.conflict_count || pgRow[0]?.conflict_count || 0);\nappt.availability_checked = true;\n\nif (conflicts > 0) {\n  appt.conflict_detected = true;\n  appt.conflict_details = pgRow.conflict_details || pgRow[0]?.conflict_details || '';\n  appt.status = 'conflict';\n  appt.flags.push('slot_unavailable');\n\n  // Suggest alternatives at +30min, +1h, +2h, next business day\n  const base = new Date(appt.requested_time).getTime();\n  appt.alternatives = [\n    { offset: '+30 min',   time: new Date(base + 30*60000).toISOString() },\n    { offset: '+1 hour',   time: new Date(base + 60*60000).toISOString() },\n    { offset: '+2 hours',  time: new Date(base + 120*60000).toISOString() },\n    { offset: 'Next day',  time: new Date(base + 86400000).toISOString() }\n  ];\n} else {\n  appt.conflict_detected = false;\n  appt.flags.push('slot_available');\n}\nreturn [{ json: { appt, raw_payload: apptData.raw_payload } }];"
+        }
+      },
+      {
+        "id": "n_avail_gate",
+        "name": "Availability Gate",
+        "type": "n8n-nodes-base.if",
+        "typeVersion": 2,
+        "position": [
+          2220,
+          60
+        ],
+        "parameters": {
+          "conditions": {
+            "options": {
+              "caseSensitive": true,
+              "leftValue": "",
+              "typeValidation": "strict"
+            },
+            "conditions": [
+              {
+                "leftValue": "={{ $json.appt.conflict_detected }}",
+                "rightValue": false,
+                "operator": {
+                  "type": "boolean",
+                  "operation": "equals"
+                }
+              }
+            ],
+            "combinator": "and"
+          }
+        }
+      },
+      {
+        "id": "n_decision",
+        "name": "Build Booking Decision",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          2440,
+          -40
+        ],
+        "parameters": {
+          "jsCode": "const data = $input.first().json;\nconst appt = { ...data.appt };\nappt.flags = Array.isArray(appt.flags) ? [...appt.flags] : [];\nconst cfg = appt._config || {};\nconst autoSources = cfg.auto_confirm_sources || ['internal','crm','staff'];\n\nlet autoConfirm = false, reason = '';\n\nif (autoSources.includes(appt.source_type)) {\n  autoConfirm = true; reason = 'trusted_source:' + appt.source_type;\n} else if (appt.intent_confidence >= 0.90 && appt.urgency_level !== 'urgent') {\n  autoConfirm = true; reason = 'high_confidence_booking';\n} else {\n  autoConfirm = false; reason = 'standard_review';\n}\n\n// Urgent always gets staff review regardless of source\nif (appt.urgency_level === 'urgent' && cfg.urgent_review_required !== false) {\n  autoConfirm = false; reason = 'urgent_requires_staff_review';\n  appt.flags.push('urgent_staff_review');\n}\n\n// Outside business hours -> staff review\nif (appt.flags.includes('outside_business_hours')) {\n  autoConfirm = false;\n  reason = reason === 'trusted_source:' + appt.source_type ? reason : 'outside_business_hours_requires_review';\n  if (!appt.flags.includes('hours_review')) appt.flags.push('hours_review');\n}\n\nappt.auto_confirmed = autoConfirm;\nappt.scheduling_decision = { auto_confirm: autoConfirm, reason, decided_at: new Date().toISOString() };\nreturn [{ json: { appt, raw_payload: data.raw_payload } }];"
+        }
+      },
+      {
+        "id": "n_auto_gate",
+        "name": "Auto-Confirm Gate",
+        "type": "n8n-nodes-base.if",
+        "typeVersion": 2,
+        "position": [
+          2660,
+          -40
+        ],
+        "parameters": {
+          "conditions": {
+            "options": {
+              "caseSensitive": true,
+              "leftValue": "",
+              "typeValidation": "strict"
+            },
+            "conditions": [
+              {
+                "leftValue": "={{ $json.appt.auto_confirmed }}",
+                "rightValue": true,
+                "operator": {
+                  "type": "boolean",
+                  "operation": "equals"
+                }
+              }
+            ],
+            "combinator": "and"
+          }
+        }
+      },
+      {
+        "id": "n_confirm",
+        "name": "Confirm Appointment",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          2880,
+          -120
+        ],
+        "parameters": {
+          "jsCode": "const data = $input.first().json;\nconst appt = { ...data.appt };\nappt.flags = Array.isArray(appt.flags) ? [...appt.flags] : [];\n\nappt.confirmed_time = appt.requested_time;\nappt.status = 'confirmed';\nappt.auto_confirmed = true;\nappt.processed_at = new Date().toISOString();\n\n// Build reminder sequence based on how far away the appointment is\nconst confMs = new Date(appt.confirmed_time).getTime();\nconst nowMs = Date.now();\nconst hoursAway = (confMs - nowMs) / 3600000;\nconst seq = [{ type: 'confirmation', send_at: new Date().toISOString(), sent: true }];\nif (hoursAway > 24) seq.push({ type: '24h_reminder', send_at: new Date(confMs - 86400000).toISOString(), sent: false });\nif (hoursAway > 2)  seq.push({ type: '2h_reminder',  send_at: new Date(confMs - 7200000).toISOString(),  sent: false });\nif (hoursAway > 0)  seq.push({ type: 'follow_up',    send_at: new Date(confMs + 7200000).toISOString(),  sent: false });\nappt.reminder_sequence = seq;\n\nreturn [{ json: { appt, raw_payload: data.raw_payload } }];"
+        }
+      },
+      {
+        "id": "n_email_confirm",
+        "name": "Send Confirmation",
+        "type": "n8n-nodes-base.gmail",
+        "typeVersion": 2,
+        "position": [
+          3100,
+          -120
+        ],
+        "parameters": {
+          "sendTo": "={{ $json.appt.contact_email }}",
+          "subject": "={{ 'Appointment Confirmed — ' + ($json.appt.service_type || 'Appointment') + ' on ' + new Date($json.appt.confirmed_time).toLocaleDateString('en-US', {weekday:'short',month:'short',day:'numeric',year:'numeric'}) }}",
+          "emailType": "html",
+          "message": "={{ '<h2 style=\"color:#2d6a4f\">Your Appointment is Confirmed</h2><table style=\"border-collapse:collapse;width:100%;max-width:560px\"><tr><td style=\"padding:8px 12px;border:1px solid #ddd;background:#f9f9f9\"><b>Service</b></td><td style=\"padding:8px 12px;border:1px solid #ddd\">' + ($json.appt.service_type || 'Appointment') + '</td></tr><tr><td style=\"padding:8px 12px;border:1px solid #ddd;background:#f9f9f9\"><b>Date & Time</b></td><td style=\"padding:8px 12px;border:1px solid #ddd\">' + new Date($json.appt.confirmed_time).toLocaleString('en-US', {timeZone:$json.appt.timezone||'UTC'}) + ' (' + ($json.appt.timezone||'UTC') + ')</td></tr><tr><td style=\"padding:8px 12px;border:1px solid #ddd;background:#f9f9f9\"><b>Duration</b></td><td style=\"padding:8px 12px;border:1px solid #ddd\">' + $json.appt.duration_minutes + ' minutes</td></tr>' + ($json.appt.location_or_link ? '<tr><td style=\"padding:8px 12px;border:1px solid #ddd;background:#f9f9f9\"><b>Location / Link</b></td><td style=\"padding:8px 12px;border:1px solid #ddd\">' + $json.appt.location_or_link + '</td></tr>' : '') + ($json.appt.assigned_staff ? '<tr><td style=\"padding:8px 12px;border:1px solid #ddd;background:#f9f9f9\"><b>With</b></td><td style=\"padding:8px 12px;border:1px solid #ddd\">' + $json.appt.assigned_staff + '</td></tr>' : '') + '<tr><td style=\"padding:8px 12px;border:1px solid #ddd;background:#f9f9f9\"><b>Reference ID</b></td><td style=\"padding:8px 12px;border:1px solid #ddd;font-family:monospace\">' + $json.appt.appointment_id + '</td></tr></table>' + ($json.appt.notes ? '<p><b>Your notes:</b> ' + $json.appt.notes + '</p>' : '') + '<p style=\"color:#555;font-size:13px\">To reschedule or cancel, contact us and reference your ID above.</p>' }}",
+          "options": {}
+        },
+        "credentials": {
+          "gmailOAuth2": {
+            "id": "bHMHyGqUtDInnHet",
+            "name": "Gmail account"
+          }
+        },
+        "continueOnFail": true,
+        "webhookId": "1a6fa75d-729a-4fd5-9aac-33428b4f2ecc"
+      },
+      {
+        "id": "n_queue",
+        "name": "Queue for Review",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          2880,
+          0
+        ],
+        "parameters": {
+          "jsCode": "const data = $input.first().json;\nconst appt = { ...data.appt };\nappt.status = 'pending_review';\nappt.confirmed_time = appt.requested_time;\nappt.auto_confirmed = false;\nappt.processed_at = new Date().toISOString();\nreturn [{ json: { appt, raw_payload: data.raw_payload } }];"
+        }
+      },
+      {
+        "id": "n_notify_staff",
+        "name": "Notify Staff",
+        "type": "n8n-nodes-base.gmail",
+        "typeVersion": 2,
+        "position": [
+          3100,
+          0
+        ],
+        "parameters": {
+          "sendTo": "qadautomation@gmail.com",
+          "subject": "={{ '[Review Required] ' + ($json.appt.urgency_level === 'urgent' ? '🚨 URGENT — ' : '') + ($json.appt.service_type || 'Appointment') + ' request from ' + ($json.appt.contact_name || $json.appt.contact_email) }}",
+          "emailType": "html",
+          "message": "={{ '<h2>Appointment Request — Staff Review Required</h2><table style=\"border-collapse:collapse;width:100%;max-width:560px\"><tr><td style=\"padding:8px;border:1px solid #ddd\"><b>Client</b></td><td style=\"padding:8px;border:1px solid #ddd\">' + ($json.appt.contact_name || 'N/A') + ' (' + ($json.appt.contact_email || 'N/A') + ')</td></tr><tr><td style=\"padding:8px;border:1px solid #ddd\"><b>Service</b></td><td style=\"padding:8px;border:1px solid #ddd\">' + ($json.appt.service_type || 'N/A') + '</td></tr><tr><td style=\"padding:8px;border:1px solid #ddd\"><b>Requested Time</b></td><td style=\"padding:8px;border:1px solid #ddd\">' + ($json.appt.requested_time ? new Date($json.appt.requested_time).toLocaleString() : 'N/A') + '</td></tr><tr><td style=\"padding:8px;border:1px solid #ddd\"><b>Urgency</b></td><td style=\"padding:8px;border:1px solid #ddd\">' + $json.appt.urgency_level + '</td></tr><tr><td style=\"padding:8px;border:1px solid #ddd\"><b>ID</b></td><td style=\"padding:8px;border:1px solid #ddd;font-family:monospace\">' + $json.appt.appointment_id + '</td></tr><tr><td style=\"padding:8px;border:1px solid #ddd\"><b>Reason Queued</b></td><td style=\"padding:8px;border:1px solid #ddd\">' + (($json.appt.scheduling_decision || {}).reason || 'N/A') + '</td></tr></table><p>Please confirm or decline this appointment.</p>' }}",
+          "options": {}
+        },
+        "credentials": {
+          "gmailOAuth2": {
+            "id": "bHMHyGqUtDInnHet",
+            "name": "Gmail account"
+          }
+        },
+        "continueOnFail": true,
+        "webhookId": "e4307e6d-99f4-4275-a907-eb72ad6e7e09"
+      },
+      {
+        "id": "n_conflict",
+        "name": "Handle Conflict",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          2440,
+          140
+        ],
+        "parameters": {
+          "jsCode": "const data = $input.first().json;\nconst appt = { ...data.appt };\nappt.status = 'conflict';\nappt.processed_at = new Date().toISOString();\nreturn [{ json: { appt, raw_payload: data.raw_payload } }];"
+        }
+      },
+      {
+        "id": "n_email_conflict",
+        "name": "Send Conflict Notice",
+        "type": "n8n-nodes-base.gmail",
+        "typeVersion": 2,
+        "position": [
+          2660,
+          140
+        ],
+        "parameters": {
+          "sendTo": "={{ $json.appt.contact_email }}",
+          "subject": "={{ 'Time Slot Unavailable — ' + ($json.appt.service_type || 'Appointment') + ' Request' }}",
+          "emailType": "html",
+          "message": "={{ '<h2>That time slot is not available</h2><p>We could not book your ' + ($json.appt.service_type || 'appointment') + ' for ' + new Date($json.appt.requested_time).toLocaleString() + '.</p><h3>Available alternatives:</h3><ul>' + ($json.appt.alternatives || []).map(a => '<li>' + a.offset + ': ' + new Date(a.time).toLocaleString() + '</li>').join('') + '</ul><p>Reply to this email or rebook using your reference: <code>' + $json.appt.appointment_id + '</code></p>' }}",
+          "options": {}
+        },
+        "credentials": {
+          "gmailOAuth2": {
+            "id": "bHMHyGqUtDInnHet",
+            "name": "Gmail account"
+          }
+        },
+        "continueOnFail": true,
+        "webhookId": "46e34054-e9e7-4574-8c9c-2e7c952f0c71"
+      },
+      {
+        "id": "n_val_fail",
+        "name": "Validation Fail Response",
+        "type": "n8n-nodes-base.respondToWebhook",
+        "typeVersion": 1.1,
+        "position": [
+          1780,
+          260
+        ],
+        "parameters": {
+          "respondWith": "json",
+          "responseBody": "={{ { status: \"error\", error_type: \"validation\", errors: $json.appt.validation_errors, appointment_id: $json.appt.appointment_id } }}",
+          "options": {
+            "responseCode": 400
+          }
+        }
+      },
+      {
+        "id": "n_val_fail_log",
+        "name": "Log Validation Failure",
+        "type": "n8n-nodes-base.postgres",
+        "typeVersion": 2.5,
+        "position": [
+          1780,
+          380
+        ],
+        "parameters": {
+          "operation": "executeQuery",
+          "query": "INSERT INTO appointment_log (appointment_id, execution_id, workflow_version, client_id, source_type, contact_email, service_type, requested_time, status, validation_passed, validation_errors, raw_payload, normalized_payload, received_at, processed_at) VALUES ('{{ $json.appt.appointment_id }}', {{ $json.appt.execution_id ? \"'\" + $json.appt.execution_id + \"'\" : 'NULL' }}, 'appointment_scheduling_v1', '{{ $json.appt.client_id }}', {{ $json.appt.source_type ? \"'\" + $json.appt.source_type + \"'\" : 'NULL' }}, {{ $json.appt.contact_email ? \"'\" + $json.appt.contact_email + \"'\" : 'NULL' }}, {{ $json.appt.service_type ? \"'\" + $json.appt.service_type + \"'\" : 'NULL' }}, {{ $json.appt.requested_time ? \"'\" + $json.appt.requested_time + \"'\" : 'NULL' }}::timestamptz, 'rejected', false, '{{ JSON.stringify($json.appt.validation_errors) }}'::jsonb, '{{ JSON.stringify($json.raw_payload).replace(/'/g,\"''\") }}'::jsonb, '{{ JSON.stringify($json.appt).replace(/'/g,\"''\") }}'::jsonb, NOW(), NOW()) ON CONFLICT (appointment_id) DO NOTHING;",
+          "options": {}
+        },
+        "credentials": {
+          "postgres": {
+            "id": "MMScP2tKEgzvhkYM",
+            "name": "Postgres account"
+          }
+        },
+        "continueOnFail": true
+      },
+      {
+        "id": "n_build_reschedule",
+        "name": "Build Reschedule",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          1340,
+          380
+        ],
+        "parameters": {
+          "jsCode": "const data = $input.first().json;\nconst appt = { ...data.appt };\nappt.flags = Array.isArray(appt.flags) ? [...appt.flags] : [];\nconst errors = [];\n\nconst lookupId = appt.previous_appointment_id || appt.appointment_id;\nif (!lookupId) errors.push('appointment_id or previous_appointment_id required for rescheduling');\nif (!appt.requested_time) errors.push('New requested_time is required');\nif (!appt.contact_email) errors.push('contact_email required to verify identity');\n\nappt.lookup_id = lookupId;\n\nif (errors.length > 0) {\n  appt.validation_passed = false;\n  appt.validation_errors = errors;\n  appt.status = 'rejected';\n} else {\n  appt.validation_passed = true;\n}\nreturn [{ json: { appt, raw_payload: data.raw_payload } }];"
+        }
+      },
+      {
+        "id": "n_check_new_slot",
+        "name": "Check New Slot",
+        "type": "n8n-nodes-base.postgres",
+        "typeVersion": 2.5,
+        "position": [
+          1560,
+          380
+        ],
+        "parameters": {
+          "operation": "executeQuery",
+          "query": "SELECT COUNT(*) AS conflict_count\nFROM appointment_log\nWHERE status IN ('confirmed','pending_review','pending')\nAND client_id = '{{ $json.appt.client_id }}'\nAND appointment_id != '{{ $json.appt.lookup_id }}'\nAND confirmed_time IS NOT NULL AND end_time IS NOT NULL\nAND (confirmed_time, end_time) OVERLAPS (\n  '{{ $json.appt.requested_time }}'::timestamptz,\n  '{{ $json.appt.end_time }}'::timestamptz\n){{ $json.appt.assigned_staff ? \" AND assigned_staff = '\" + $json.appt.assigned_staff + \"'\" : \"\" }}",
+          "options": {}
+        },
+        "credentials": {
+          "postgres": {
+            "id": "MMScP2tKEgzvhkYM",
+            "name": "Postgres account"
+          }
+        },
+        "continueOnFail": true
+      },
+      {
+        "id": "n_proc_reschedule",
+        "name": "Process Reschedule",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          1780,
+          380
+        ],
+        "parameters": {
+          "jsCode": "const pgRow = $input.first().json;\nconst apptData = $('Build Reschedule').first().json;\nconst appt = { ...apptData.appt };\nappt.flags = Array.isArray(appt.flags) ? [...appt.flags] : [];\n\nconst conflicts = parseInt(pgRow.conflict_count || pgRow[0]?.conflict_count || 0);\nif (conflicts > 0) {\n  appt.status = 'conflict';\n  appt.conflict_detected = true;\n  appt.flags.push('reschedule_slot_unavailable');\n  appt.processed_at = new Date().toISOString();\n} else {\n  appt.confirmed_time = appt.requested_time;\n  appt.status = 'rescheduled';\n  appt.processed_at = new Date().toISOString();\n  appt.flags.push('reschedule_ok');\n}\nreturn [{ json: { appt, raw_payload: apptData.raw_payload } }];"
+        }
+      },
+      {
+        "id": "n_apply_reschedule",
+        "name": "Apply Reschedule",
+        "type": "n8n-nodes-base.postgres",
+        "typeVersion": 2.5,
+        "position": [
+          2000,
+          380
+        ],
+        "parameters": {
+          "operation": "executeQuery",
+          "query": "UPDATE appointment_log\nSET confirmed_time = {{ $json.appt.status === 'rescheduled' ? \"'\" + $json.appt.confirmed_time + \"'::timestamptz\" : 'confirmed_time' }},\n    end_time       = {{ $json.appt.status === 'rescheduled' ? \"'\" + $json.appt.end_time + \"'::timestamptz\" : 'end_time' }},\n    status         = '{{ $json.appt.status }}',\n    notes          = COALESCE(notes,'') || '{{ $json.appt.status === \"rescheduled\" ? \" | Rescheduled \" + $json.appt.processed_at : \" | Reschedule conflict \" + $json.appt.processed_at }}',\n    processed_at   = NOW()\nWHERE appointment_id = '{{ $json.appt.lookup_id }}'\nAND   client_id      = '{{ $json.appt.client_id }}'\nRETURNING appointment_id, status, contact_email, contact_name, confirmed_time",
+          "options": {}
+        },
+        "credentials": {
+          "postgres": {
+            "id": "MMScP2tKEgzvhkYM",
+            "name": "Postgres account"
+          }
+        },
+        "continueOnFail": true
+      },
+      {
+        "id": "n_email_reschedule",
+        "name": "Send Reschedule Email",
+        "type": "n8n-nodes-base.gmail",
+        "typeVersion": 2,
+        "position": [
+          2220,
+          380
+        ],
+        "parameters": {
+          "sendTo": "={{ $json.appt.contact_email }}",
+          "subject": "={{ $json.appt.status === 'rescheduled' ? 'Appointment Rescheduled — ' + ($json.appt.service_type || 'Appointment') : 'Reschedule Request — Time Slot Unavailable' }}",
+          "emailType": "html",
+          "message": "={{ $json.appt.status === 'rescheduled' ? '<h2 style=\"color:#2d6a4f\">Appointment Rescheduled</h2><p>Your appointment has been moved to <b>' + new Date($json.appt.confirmed_time).toLocaleString('en-US', {timeZone:$json.appt.timezone||'UTC'}) + '</b>.</p><p>Reference: <code>' + $json.appt.appointment_id + '</code></p>' : '<h2>New Time Slot Unavailable</h2><p>The new time you requested is not available. Your original appointment remains unchanged.</p><p>Reference: <code>' + ($json.appt.previous_appointment_id || $json.appt.appointment_id) + '</code></p>' }}",
+          "options": {}
+        },
+        "credentials": {
+          "gmailOAuth2": {
+            "id": "bHMHyGqUtDInnHet",
+            "name": "Gmail account"
+          }
+        },
+        "continueOnFail": true,
+        "webhookId": "2b3ae6fc-8184-4397-ba2d-937aec16132a"
+      },
+      {
+        "id": "n_build_cancel",
+        "name": "Build Cancellation",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          1340,
+          540
+        ],
+        "parameters": {
+          "jsCode": "const data = $input.first().json;\nconst appt = { ...data.appt };\nappt.flags = Array.isArray(appt.flags) ? [...appt.flags] : [];\nconst errors = [];\n\nif (!appt.appointment_id) errors.push('appointment_id is required');\nif (!appt.contact_email)  errors.push('contact_email required to verify identity');\n\nif (errors.length > 0) {\n  appt.validation_passed = false;\n  appt.validation_errors = errors;\n  appt.status = 'rejected';\n} else {\n  appt.validation_passed = true;\n  appt.status = 'cancelled';\n  appt.processed_at = new Date().toISOString();\n}\nreturn [{ json: { appt, raw_payload: data.raw_payload } }];"
+        }
+      },
+      {
+        "id": "n_apply_cancel",
+        "name": "Apply Cancellation",
+        "type": "n8n-nodes-base.postgres",
+        "typeVersion": 2.5,
+        "position": [
+          1560,
+          540
+        ],
+        "parameters": {
+          "operation": "executeQuery",
+          "query": "UPDATE appointment_log\nSET status       = 'cancelled',\n    cancel_reason = {{ $json.appt.cancel_reason ? \"'\" + $json.appt.cancel_reason.replace(/'/g,\"''\") + \"'\" : 'NULL' }},\n    processed_at = NOW()\nWHERE appointment_id = '{{ $json.appt.appointment_id }}'\nAND   client_id      = '{{ $json.appt.client_id }}'\nRETURNING appointment_id, status, contact_email, contact_name",
+          "options": {}
+        },
+        "credentials": {
+          "postgres": {
+            "id": "MMScP2tKEgzvhkYM",
+            "name": "Postgres account"
+          }
+        },
+        "continueOnFail": true
+      },
+      {
+        "id": "n_email_cancel",
+        "name": "Send Cancellation Email",
+        "type": "n8n-nodes-base.gmail",
+        "typeVersion": 2,
+        "position": [
+          1780,
+          540
+        ],
+        "parameters": {
+          "sendTo": "={{ $json.appt.contact_email }}",
+          "subject": "={{ 'Appointment Cancelled — ' + ($json.appt.service_type || 'Appointment') }}",
+          "emailType": "html",
+          "message": "={{ '<h2>Appointment Cancelled</h2><p>Your appointment has been cancelled.</p>' + ($json.appt.cancel_reason ? '<p><b>Reason:</b> ' + $json.appt.cancel_reason + '</p>' : '') + '<p>Reference ID: <code>' + $json.appt.appointment_id + '</code></p><p>To rebook, simply reply to this email or submit a new booking request.</p>' }}",
+          "options": {}
+        },
+        "credentials": {
+          "gmailOAuth2": {
+            "id": "bHMHyGqUtDInnHet",
+            "name": "Gmail account"
+          }
+        },
+        "continueOnFail": true,
+        "webhookId": "b6761e24-2f2c-4a60-9c65-bd5eb644135e"
+      },
+      {
+        "id": "n_prep_log",
+        "name": "Prepare Log Data",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          3380,
+          200
+        ],
+        "parameters": {
+          "jsCode": "// Try each source node in priority order — whichever path ran has valid appt.appointment_id\nconst sources = ['Confirm Appointment','Queue for Review','Handle Conflict',\n  'Process Reschedule','Build Cancellation','Parse Ollama Intent','Classify Intent'];\nlet appt = {}, raw = {};\nfor (const src of sources) {\n  try {\n    const d = $(src).first().json;\n    if (d && d.appt && d.appt.appointment_id) { appt = d.appt; raw = d.raw_payload || {}; break; }\n  } catch(e) {}\n}\n\nreturn [{\n  json: {\n    appointment_id:          appt.appointment_id || 'unknown',\n    execution_id:            appt.execution_id || null,\n    workflow_version:        appt.workflow_version || 'appointment_scheduling_v1',\n    client_id:               appt.client_id || 'default',\n    request_type:            appt.intent || appt.request_type || null,\n    source_type:             appt.source_type || null,\n    source_channel:          appt.source_channel || null,\n    contact_name:            appt.contact_name || null,\n    contact_email:           appt.contact_email || null,\n    contact_phone:           appt.contact_phone || null,\n    service_type:            appt.service_type || null,\n    appointment_type:        appt.appointment_type || null,\n    requested_time:          appt.requested_time || null,\n    confirmed_time:          appt.confirmed_time || appt.requested_time || null,\n    end_time:                appt.end_time || null,\n    timezone:                appt.timezone || 'UTC',\n    duration_minutes:        appt.duration_minutes || 60,\n    buffer_before_minutes:   appt.buffer_before_minutes || 0,\n    buffer_after_minutes:    appt.buffer_after_minutes || 15,\n    assigned_staff:          appt.assigned_staff || null,\n    calendar_target:         appt.calendar_target || null,\n    location_or_link:        appt.location_or_link || null,\n    status:                  appt.status || 'unknown',\n    urgency_level:           appt.urgency_level || 'normal',\n    raw_payload:             JSON.stringify(raw),\n    normalized_payload:      JSON.stringify(appt),\n    scheduling_decision:     JSON.stringify(appt.scheduling_decision || {}),\n    availability_checked:    appt.availability_checked || false,\n    conflict_detected:       appt.conflict_detected || false,\n    auto_confirmed:          appt.auto_confirmed || false,\n    reminder_sequence:       JSON.stringify(appt.reminder_sequence || []),\n    intent_detected:         appt.intent || null,\n    ai_model_used:           appt.ai_model_used || null,\n    ai_model_source:         appt.ai_model_source || 'none',\n    ai_response_time_ms:     appt.ai_response_time_ms || 0,\n    ai_fallback_used:        appt.ai_fallback_used || false,\n    previous_appointment_id: appt.previous_appointment_id || null,\n    cancel_reason:           appt.cancel_reason || null,\n    validation_passed:       appt.validation_passed !== false,\n    validation_errors:       JSON.stringify(appt.validation_errors || []),\n    notes:                   appt.notes ? appt.notes.substring(0, 2000) : null,\n    error_message:           appt.error_message || null,\n    alternatives:            JSON.stringify(appt.alternatives || []),\n    received_at:             appt.received_at || new Date().toISOString(),\n    processed_at:            appt.processed_at || new Date().toISOString()\n  }\n}];"
+        }
+      },
+      {
+        "id": "n_log_pg",
+        "name": "Log to PostgreSQL",
+        "type": "n8n-nodes-base.postgres",
+        "typeVersion": 2.5,
+        "position": [
+          3600,
+          200
+        ],
+        "parameters": {
+          "operation": "executeQuery",
+          "query": "INSERT INTO appointment_log (\n  appointment_id, execution_id, workflow_version, client_id,\n  request_type, source_type, source_channel,\n  contact_name, contact_email, contact_phone,\n  service_type, appointment_type,\n  requested_time, confirmed_time, end_time, timezone,\n  duration_minutes, buffer_before_minutes, buffer_after_minutes,\n  assigned_staff, calendar_target, location_or_link,\n  status, urgency_level,\n  raw_payload, normalized_payload, scheduling_decision,\n  availability_checked, conflict_detected, auto_confirmed,\n  reminder_sequence,\n  intent_detected, ai_model_used, ai_model_source, ai_response_time_ms, ai_fallback_used,\n  previous_appointment_id, cancel_reason,\n  validation_passed, validation_errors, notes, error_message,\n  received_at, processed_at\n) VALUES (\n  '{{ $json.appointment_id }}',\n  {{ $json.execution_id ? \"'\" + $json.execution_id + \"'\" : 'NULL' }},\n  '{{ $json.workflow_version }}',\n  '{{ $json.client_id }}',\n  {{ $json.request_type ? \"'\" + $json.request_type + \"'\" : 'NULL' }},\n  {{ $json.source_type ? \"'\" + $json.source_type + \"'\" : 'NULL' }},\n  {{ $json.source_channel ? \"'\" + $json.source_channel + \"'\" : 'NULL' }},\n  {{ $json.contact_name ? \"'\" + $json.contact_name.replace(/'/g,\"''\") + \"'\" : 'NULL' }},\n  {{ $json.contact_email ? \"'\" + $json.contact_email + \"'\" : 'NULL' }},\n  {{ $json.contact_phone ? \"'\" + $json.contact_phone + \"'\" : 'NULL' }},\n  {{ $json.service_type ? \"'\" + $json.service_type + \"'\" : 'NULL' }},\n  {{ $json.appointment_type ? \"'\" + $json.appointment_type + \"'\" : 'NULL' }},\n  {{ $json.requested_time ? \"'\" + $json.requested_time + \"'\" : 'NULL' }}::timestamptz,\n  {{ $json.confirmed_time ? \"'\" + $json.confirmed_time + \"'\" : 'NULL' }}::timestamptz,\n  {{ $json.end_time ? \"'\" + $json.end_time + \"'\" : 'NULL' }}::timestamptz,\n  '{{ $json.timezone || \"UTC\" }}',\n  {{ $json.duration_minutes || 60 }},\n  {{ $json.buffer_before_minutes || 0 }},\n  {{ $json.buffer_after_minutes || 15 }},\n  {{ $json.assigned_staff ? \"'\" + $json.assigned_staff + \"'\" : 'NULL' }},\n  {{ $json.calendar_target ? \"'\" + $json.calendar_target + \"'\" : 'NULL' }},\n  {{ $json.location_or_link ? \"'\" + $json.location_or_link.replace(/'/g,\"''\") + \"'\" : 'NULL' }},\n  '{{ $json.status || \"unknown\" }}',\n  '{{ $json.urgency_level || \"normal\" }}',\n  '{{ $json.raw_payload.replace(/'/g,\"''\") }}'::jsonb,\n  '{{ $json.normalized_payload.replace(/'/g,\"''\") }}'::jsonb,\n  '{{ $json.scheduling_decision.replace(/'/g,\"''\") }}'::jsonb,\n  {{ $json.availability_checked }},\n  {{ $json.conflict_detected }},\n  {{ $json.auto_confirmed }},\n  '{{ $json.reminder_sequence }}'::jsonb,\n  {{ $json.intent_detected ? \"'\" + $json.intent_detected + \"'\" : 'NULL' }},\n  {{ $json.ai_model_used ? \"'\" + $json.ai_model_used + \"'\" : 'NULL' }},\n  '{{ $json.ai_model_source || \"none\" }}',\n  {{ $json.ai_response_time_ms || 0 }},\n  {{ $json.ai_fallback_used }},\n  {{ $json.previous_appointment_id ? \"'\" + $json.previous_appointment_id + \"'\" : 'NULL' }},\n  {{ $json.cancel_reason ? \"'\" + $json.cancel_reason.replace(/'/g,\"''\") + \"'\" : 'NULL' }},\n  {{ $json.validation_passed }},\n  '{{ $json.validation_errors }}'::jsonb,\n  {{ $json.notes ? \"'\" + $json.notes.replace(/'/g,\"''\") + \"'\" : 'NULL' }},\n  {{ $json.error_message ? \"'\" + $json.error_message.replace(/'/g,\"''\") + \"'\" : 'NULL' }},\n  '{{ $json.received_at }}'::timestamptz,\n  '{{ $json.processed_at }}'::timestamptz\n)\nON CONFLICT (appointment_id) DO UPDATE SET\n  status             = EXCLUDED.status,\n  confirmed_time     = EXCLUDED.confirmed_time,\n  end_time           = EXCLUDED.end_time,\n  scheduling_decision= EXCLUDED.scheduling_decision,\n  availability_checked=EXCLUDED.availability_checked,\n  conflict_detected  = EXCLUDED.conflict_detected,\n  auto_confirmed     = EXCLUDED.auto_confirmed,\n  reminder_sequence  = EXCLUDED.reminder_sequence,\n  ai_model_used      = EXCLUDED.ai_model_used,\n  ai_fallback_used   = EXCLUDED.ai_fallback_used,\n  processed_at       = EXCLUDED.processed_at\nRETURNING appointment_id, status, confirmed_time",
+          "options": {}
+        },
+        "credentials": {
+          "postgres": {
+            "id": "MMScP2tKEgzvhkYM",
+            "name": "Postgres account"
+          }
+        },
+        "continueOnFail": true
+      },
+      {
+        "id": "n_respond",
+        "name": "Webhook Response",
+        "type": "n8n-nodes-base.respondToWebhook",
+        "typeVersion": 1.1,
+        "position": [
+          3820,
+          200
+        ],
+        "parameters": {
+          "respondWith": "json",
+          "responseBody": "={{ (() => { const d = $('Prepare Log Data').first().json; const base = { appointment_id: d.appointment_id, status: d.status, service_type: d.service_type, contact_email: d.contact_email, processed_at: d.processed_at }; if (d.status === 'confirmed') return { ...base, confirmed_time: d.confirmed_time, duration_minutes: d.duration_minutes, location_or_link: d.location_or_link, message: 'Appointment confirmed.' }; if (d.status === 'pending_review') return { ...base, requested_time: d.requested_time, message: 'Request received — awaiting staff confirmation.' }; if (d.status === 'conflict') return { ...base, requested_time: d.requested_time, alternatives: JSON.parse(d.alternatives || '[]'), message: 'Requested slot unavailable — see alternatives.' }; if (d.status === 'rescheduled') return { ...base, confirmed_time: d.confirmed_time, message: 'Appointment rescheduled.' }; if (d.status === 'cancelled') return { ...base, message: 'Appointment cancelled.' }; if (d.status === 'inquiry') return { ...base, message: 'Inquiry received.' }; return { ...base, message: 'Request processed.' }; })() }}",
+          "options": {
+            "responseCode": 200
+          }
+        }
+      },
+      {
+        "id": "n_error",
+        "name": "Error Handler",
+        "type": "n8n-nodes-base.errorTrigger",
+        "typeVersion": 1,
+        "position": [
+          0,
+          600
+        ],
+        "parameters": {}
+      },
+      {
+        "id": "n_error_log",
+        "name": "Log Workflow Error",
+        "type": "n8n-nodes-base.postgres",
+        "typeVersion": 2.5,
+        "position": [
+          220,
+          600
+        ],
+        "parameters": {
+          "operation": "executeQuery",
+          "query": "INSERT INTO workflow_errors (execution_id, workflow_id, error_type, error_message, failed_at, retry_count, resolved) VALUES ('{{ $json.execution.id }}', 'appointment_scheduling_v1', 'fatal', '{{ ($json.error.message || \"Unknown\").replace(/'/g,\"''\") }}', NOW(), 0, false);",
+          "options": {}
+        },
+        "credentials": {
+          "postgres": {
+            "id": "MMScP2tKEgzvhkYM",
+            "name": "Postgres account"
+          }
+        },
+        "continueOnFail": true
+      }
+    ],
+    "connections": {
+      "Appointment Webhook": {
+        "main": [
+          [
+            {
+              "node": "Normalize Appointment",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Normalize Appointment": {
+        "main": [
+          [
+            {
+              "node": "Classify Intent",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Classify Intent": {
+        "main": [
+          [
+            {
+              "node": "Ollama Intent",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Ollama Intent": {
+        "main": [
+          [
+            {
+              "node": "Parse Ollama Intent",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Parse Ollama Intent": {
+        "main": [
+          [
+            {
+              "node": "Intent Router",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Intent Router": {
+        "main": [
+          [
+            {
+              "node": "Validate Booking",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Build Reschedule",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Build Cancellation",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Prepare Log Data",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Validate Booking": {
+        "main": [
+          [
+            {
+              "node": "Validation Gate",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Validation Gate": {
+        "main": [
+          [
+            {
+              "node": "Check Availability",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Validation Fail Response",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "Log Validation Failure",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Check Availability": {
+        "main": [
+          [
+            {
+              "node": "Process Availability",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Process Availability": {
+        "main": [
+          [
+            {
+              "node": "Availability Gate",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Availability Gate": {
+        "main": [
+          [
+            {
+              "node": "Build Booking Decision",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Handle Conflict",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Build Booking Decision": {
+        "main": [
+          [
+            {
+              "node": "Auto-Confirm Gate",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Auto-Confirm Gate": {
+        "main": [
+          [
+            {
+              "node": "Confirm Appointment",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Queue for Review",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Confirm Appointment": {
+        "main": [
+          [
+            {
+              "node": "Send Confirmation",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Send Confirmation": {
+        "main": [
+          [
+            {
+              "node": "Prepare Log Data",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Queue for Review": {
+        "main": [
+          [
+            {
+              "node": "Notify Staff",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Notify Staff": {
+        "main": [
+          [
+            {
+              "node": "Prepare Log Data",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Handle Conflict": {
+        "main": [
+          [
+            {
+              "node": "Send Conflict Notice",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Send Conflict Notice": {
+        "main": [
+          [
+            {
+              "node": "Prepare Log Data",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Build Reschedule": {
+        "main": [
+          [
+            {
+              "node": "Check New Slot",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Check New Slot": {
+        "main": [
+          [
+            {
+              "node": "Process Reschedule",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Process Reschedule": {
+        "main": [
+          [
+            {
+              "node": "Apply Reschedule",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Apply Reschedule": {
+        "main": [
+          [
+            {
+              "node": "Send Reschedule Email",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Send Reschedule Email": {
+        "main": [
+          [
+            {
+              "node": "Prepare Log Data",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Build Cancellation": {
+        "main": [
+          [
+            {
+              "node": "Apply Cancellation",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Apply Cancellation": {
+        "main": [
+          [
+            {
+              "node": "Send Cancellation Email",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Send Cancellation Email": {
+        "main": [
+          [
+            {
+              "node": "Prepare Log Data",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Prepare Log Data": {
+        "main": [
+          [
+            {
+              "node": "Log to PostgreSQL",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Log to PostgreSQL": {
+        "main": [
+          [
+            {
+              "node": "Webhook Response",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Error Handler": {
+        "main": [
+          [
+            {
+              "node": "Log Workflow Error",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    },
+    "authors": "Alan Coronado",
+    "name": null,
+    "description": null,
+    "autosaved": false,
+    "workflowPublishHistory": [
+      {
+        "createdAt": "2026-05-11T18:16:43.358Z",
+        "id": 72,
+        "workflowId": "muVXGTx7suWyjaiT",
+        "versionId": "6e268039-4d82-40bd-bd91-5b88fdeda1b5",
+        "event": "deactivated",
+        "userId": "57aa1325-f836-4f8b-a964-640862e141f6"
+      },
+      {
+        "createdAt": "2026-05-11T18:16:43.427Z",
+        "id": 73,
+        "workflowId": "muVXGTx7suWyjaiT",
+        "versionId": "6e268039-4d82-40bd-bd91-5b88fdeda1b5",
+        "event": "activated",
+        "userId": "57aa1325-f836-4f8b-a964-640862e141f6"
+      },
+      {
+        "createdAt": "2026-05-11T18:16:43.676Z",
+        "id": 74,
+        "workflowId": "muVXGTx7suWyjaiT",
+        "versionId": "6e268039-4d82-40bd-bd91-5b88fdeda1b5",
+        "event": "deactivated",
+        "userId": "57aa1325-f836-4f8b-a964-640862e141f6"
+      },
+      {
+        "createdAt": "2026-05-11T18:16:43.733Z",
+        "id": 75,
+        "workflowId": "muVXGTx7suWyjaiT",
+        "versionId": "6e268039-4d82-40bd-bd91-5b88fdeda1b5",
+        "event": "activated",
+        "userId": "57aa1325-f836-4f8b-a964-640862e141f6"
+      }
+    ]
+  }
+}

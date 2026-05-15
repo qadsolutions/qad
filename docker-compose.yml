@@ -1,0 +1,31 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: qad_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-qad}
+      POSTGRES_USER: ${POSTGRES_USER:-qad_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-qad_user} -d ${POSTGRES_DB:-qad}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      default: {}
+      qad-network:
+        aliases:
+          - postgres
+
+networks:
+  qad-network:
+    name: docker_qad-network
+    external: true
+
+volumes:
+  postgres_data:

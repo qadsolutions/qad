@@ -1,0 +1,77 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Poppins:wght@400;500;600;700&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: 'Inter', sans-serif;
+  --font-display: 'Poppins', sans-serif;
+
+  --color-primary:        #6366F1;
+  --color-primary-hover:  #4F46E5;
+  --color-primary-light:  #EEF2FF;
+  --color-primary-text:   #4338CA;
+
+  --color-surface:        #FFFFFF;
+  --color-base:           #F8F9FB;
+  --color-border:         #E2E8F0;
+  --color-border-subtle:  #F1F5F9;
+
+  --color-text:           #0F172A;
+  --color-text-secondary: #475569;
+  --color-text-muted:     #94A3B8;
+
+  --color-sidebar:        #0F172A;
+  --color-sidebar-text:   #CBD5E1;
+
+  --color-success:        #10B981;
+  --color-warning:        #F59E0B;
+  --color-danger:         #F43F5E;
+  --color-info:           #0EA5E9;
+}
+
+/*
+  All base styles are placed inside @layer base so that Tailwind utility
+  classes (in @layer utilities) correctly override them. Without this,
+  unlayered CSS would win over every Tailwind margin/padding utility.
+*/
+@layer base {
+  *, *::before, *::after {
+    box-sizing: border-box;
+  }
+
+  body {
+    font-family: 'Inter', sans-serif;
+    background-color: #F8F9FB;
+    color: #0F172A;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  h1, h2, h3, h4 {
+    font-family: 'Poppins', sans-serif;
+  }
+
+  :focus-visible {
+    outline: 2px solid #6366F1;
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+}
+
+@layer utilities {
+  .fade-in {
+    animation: fadeIn 0.2s ease-out;
+  }
+
+  .slide-in-right {
+    animation: slideInRight 0.3s ease-out;
+  }
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes slideInRight {
+  from { transform: translateX(100%); }
+  to   { transform: translateX(0); }
+}

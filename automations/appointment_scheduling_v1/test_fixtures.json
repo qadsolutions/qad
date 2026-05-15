@@ -1,0 +1,290 @@
+{
+  "workflow": "appointment_scheduling_v1",
+  "webhook": "http://localhost:5678/webhook/appointment",
+  "notes": "Run test_appointment_scheduling.ps1 to execute. Times are UTC. Dates: Mon=2026-05-25, Tue=2026-05-26, Sat=2026-05-30, Sun=2026-05-31.",
+  "tests": [
+    {
+      "id": "TC-APT-01",
+      "name": "Valid booking — standard (Monday 10:00 UTC)",
+      "description": "Clean booking for consultation Mon 10:00. Expects confirm or queue (confidence-dependent). Seeds the DB for TC-APT-03.",
+      "method": "POST",
+      "payload": {
+        "client_id": "acme_corp",
+        "source_type": "form",
+        "request_type": "book",
+        "contact_name": "Jane Smith",
+        "contact_email": "jane.smith@example.com",
+        "contact_phone": "555-100-2000",
+        "service_type": "consultation",
+        "appointment_type": "initial_consultation",
+        "requested_time": "2026-05-25T10:00:00Z",
+        "timezone": "America/Chicago",
+        "notes": "First visit, referred by Dr. Adams"
+      },
+      "expect": {
+        "status_in": ["confirmed", "pending_review"],
+        "has_appointment_id": true
+      }
+    },
+    {
+      "id": "TC-APT-02",
+      "name": "Valid booking — internal source auto-confirms (Tuesday 14:00 UTC)",
+      "description": "Source is 'internal' — trusted source, auto-confirm regardless of AI confidence.",
+      "method": "POST",
+      "payload": {
+        "client_id": "acme_corp",
+        "source_type": "internal",
+        "request_type": "book",
+        "contact_name": "Bob Martinez",
+        "contact_email": "bob.martinez@example.com",
+        "service_type": "follow_up",
+        "appointment_type": "follow_up",
+        "requested_time": "2026-05-26T14:00:00Z",
+        "timezone": "America/Chicago"
+      },
+      "expect": {
+        "status": "confirmed",
+        "has_appointment_id": true
+      }
+    },
+    {
+      "id": "TC-APT-03",
+      "name": "Booking conflict — overlapping slot (Monday 10:15 UTC)",
+      "description": "TC-APT-01 booked Mon 10:00 (consultation=30min+15buf=end 10:45). This requests 10:15 UTC — overlaps. Expects conflict. No assigned_staff so OVERLAPS check is client-wide.",
+      "method": "POST",
+      "payload": {
+        "client_id": "acme_corp",
+        "source_type": "form",
+        "request_type": "book",
+        "contact_name": "Carlos Reyes",
+        "contact_email": "carlos.reyes@example.com",
+        "service_type": "consultation",
+        "appointment_type": "initial_consultation",
+        "requested_time": "2026-05-25T10:15:00Z",
+        "timezone": "America/Chicago"
+      },
+      "expect": {
+        "status": "conflict",
+        "has_appointment_id": true
+      }
+    },
+    {
+      "id": "TC-APT-04",
+      "name": "Outside business hours — 07:00 UTC Monday (before open)",
+      "description": "Mon 07:00 UTC is before 08:00 open. Should flag outside_hours and queue for review, not reject.",
+      "method": "POST",
+      "payload": {
+        "client_id": "acme_corp",
+        "source_type": "form",
+        "request_type": "book",
+        "contact_name": "Linda Park",
+        "contact_email": "linda.park@example.com",
+        "service_type": "consultation",
+        "appointment_type": "initial_consultation",
+        "requested_time": "2026-05-25T07:00:00Z",
+        "timezone": "America/Chicago"
+      },
+      "expect": {
+        "status_in": ["pending_review", "pending"],
+        "has_appointment_id": true
+      }
+    },
+    {
+      "id": "TC-APT-05",
+      "name": "Validation failure — missing contact_email",
+      "description": "No email provided. Workflow should return 400 with errors array.",
+      "method": "POST",
+      "payload": {
+        "client_id": "acme_corp",
+        "source_type": "form",
+        "request_type": "book",
+        "contact_name": "No Email Person",
+        "service_type": "consultation",
+        "requested_time": "2026-05-27T10:00:00Z",
+        "timezone": "America/Chicago"
+      },
+      "expect": {
+        "http_status": 400,
+        "status": "error",
+        "has_errors_field": true
+      }
+    },
+    {
+      "id": "TC-APT-06",
+      "name": "Validation failure — missing requested_time",
+      "description": "No time provided for a book request. Workflow should return 400.",
+      "method": "POST",
+      "payload": {
+        "client_id": "acme_corp",
+        "source_type": "form",
+        "request_type": "book",
+        "contact_name": "Missing Time",
+        "contact_email": "missingtime@example.com",
+        "service_type": "consultation"
+      },
+      "expect": {
+        "http_status": 400,
+        "status": "error",
+        "has_errors_field": true
+      }
+    },
+    {
+      "id": "TC-APT-07",
+      "name": "Reschedule request",
+      "description": "Reschedule an existing appointment. Requires previous_appointment_id from TC-APT-01.",
+      "method": "POST",
+      "payload": {
+        "client_id": "acme_corp",
+        "source_type": "form",
+        "request_type": "reschedule",
+        "contact_name": "Jane Smith",
+        "contact_email": "jane.smith@example.com",
+        "service_type": "consultation",
+        "appointment_type": "initial_consultation",
+        "requested_time": "2026-05-27T11:00:00Z",
+        "timezone": "America/Chicago",
+        "previous_appointment_id": "REPLACE_WITH_EXISTING_ID",
+        "notes": "Need to move to Wednesday"
+      },
+      "expect": {
+        "status_in": ["rescheduled", "conflict"],
+        "has_appointment_id": true
+      }
+    },
+    {
+      "id": "TC-APT-08",
+      "name": "Cancellation request",
+      "description": "Cancel an existing appointment. Requires previous_appointment_id from TC-APT-01.",
+      "method": "POST",
+      "payload": {
+        "client_id": "acme_corp",
+        "source_type": "form",
+        "request_type": "cancel",
+        "contact_name": "Jane Smith",
+        "contact_email": "jane.smith@example.com",
+        "previous_appointment_id": "REPLACE_WITH_EXISTING_ID",
+        "cancel_reason": "Schedule conflict on client side"
+      },
+      "expect": {
+        "status": "cancelled",
+        "has_appointment_id": true
+      }
+    },
+    {
+      "id": "TC-APT-09",
+      "name": "Inquiry — natural language with general time preference (Wednesday 11:00)",
+      "description": "No explicit request_type, ambiguous inquiry message. Has a preferred time so validation passes regardless of intent routing.",
+      "method": "POST",
+      "payload": {
+        "client_id": "acme_corp",
+        "source_type": "form",
+        "contact_name": "Sam Torres",
+        "contact_email": "sam.torres@example.com",
+        "contact_phone": "555-900-1234",
+        "message": "Hi, I was wondering if you have any availability next week for an initial consultation? Something around Wednesday morning would be ideal.",
+        "service_type": "consultation",
+        "requested_time": "2026-05-27T11:00:00Z",
+        "timezone": "America/Chicago"
+      },
+      "expect": {
+        "status_in": ["confirmed", "pending_review", "conflict"],
+        "has_appointment_id": true
+      }
+    },
+    {
+      "id": "TC-APT-10",
+      "name": "Urgent booking — always routes to staff review (Monday 15:00 UTC)",
+      "description": "urgency_level=urgent. Should route to pending_review regardless of source. Uses 15:00 slot to avoid conflict with TC-APT-01.",
+      "method": "POST",
+      "payload": {
+        "client_id": "acme_corp",
+        "source_type": "phone",
+        "request_type": "book",
+        "contact_name": "Emergency Patient",
+        "contact_email": "emergency@example.com",
+        "contact_phone": "555-911-0000",
+        "service_type": "follow_up",
+        "appointment_type": "urgent_followup",
+        "requested_time": "2026-05-25T15:00:00Z",
+        "timezone": "America/Chicago",
+        "urgency_level": "urgent",
+        "notes": "Patient reports worsening symptoms, needs same-day follow-up"
+      },
+      "expect": {
+        "status": "pending_review",
+        "has_appointment_id": true
+      }
+    },
+    {
+      "id": "TC-APT-11",
+      "name": "Empty body — graceful handling",
+      "description": "Empty payload. Workflow should not crash. Will route as inquiry fallback and respond with some appointment_id.",
+      "method": "POST",
+      "payload": {},
+      "expect": {
+        "no_server_error": true
+      }
+    },
+    {
+      "id": "TC-APT-12",
+      "name": "Ollama fallback — keyword routing still works (Thursday 10:00 UTC)",
+      "description": "Even if Ollama is unavailable, keyword classify routes the explicit book request correctly. Stop Ollama to fully test; otherwise confirms Ollama is working.",
+      "method": "POST",
+      "payload": {
+        "client_id": "acme_corp",
+        "source_type": "form",
+        "request_type": "book",
+        "contact_name": "Fallback Test User",
+        "contact_email": "fallback@example.com",
+        "service_type": "consultation",
+        "requested_time": "2026-05-28T10:00:00Z",
+        "timezone": "America/Chicago"
+      },
+      "expect": {
+        "status_in": ["confirmed", "pending_review"],
+        "has_appointment_id": true
+      }
+    },
+    {
+      "id": "TC-APT-13",
+      "name": "Saturday booking — within hours (Saturday 10:00 UTC = within 09:00-13:00)",
+      "description": "Saturday 2026-05-30 10:00 UTC is within Saturday hours (09:00-13:00). Should succeed and confirm or queue.",
+      "method": "POST",
+      "payload": {
+        "client_id": "acme_corp",
+        "source_type": "form",
+        "request_type": "book",
+        "contact_name": "Weekend Booker",
+        "contact_email": "weekend@example.com",
+        "service_type": "follow_up",
+        "appointment_type": "follow_up",
+        "requested_time": "2026-05-30T10:00:00Z",
+        "timezone": "America/Chicago"
+      },
+      "expect": {
+        "status_in": ["confirmed", "pending_review"],
+        "has_appointment_id": true
+      }
+    },
+    {
+      "id": "TC-APT-14",
+      "name": "Sunday booking — closed day queues for review",
+      "description": "Sunday 2026-05-31 is closed (null business_hours). Should flag outside_hours and queue for review, not reject.",
+      "method": "POST",
+      "payload": {
+        "client_id": "acme_corp",
+        "source_type": "form",
+        "request_type": "book",
+        "contact_name": "Sunday Booker",
+        "contact_email": "sunday@example.com",
+        "service_type": "consultation",
+        "requested_time": "2026-05-31T11:00:00Z",
+        "timezone": "America/Chicago"
+      },
+      "expect": {
+        "status_in": ["pending_review", "pending"],
+        "has_appointment_id": true
+      }
+    }
+  ]
+}
