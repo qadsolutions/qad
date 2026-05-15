@@ -36,7 +36,7 @@ Do not advance to the next phase until the user explicitly approves. During any 
 ---
 
 ## Current Phase
-**Phase 5 — React Dashboard Build** *(Complete — Phase 5 review pending)*
+**Phase 8 — Documentation & Handoff** *(Complete)*
 
 ---
 
@@ -542,6 +542,56 @@ Key gotchas:
 - Local Windows Postgres runs on port 5432 and conflicts with Docker's port mapping — `docker-compose.yml` maps `qad_postgres` to **5433** to avoid this
 - Ollama must be running at `localhost:11434` before activating n8n automations
 - Gmail OAuth2 is configured in n8n — SMTP credentials are not needed
+
+---
+
+### Phase 7 — Docker Deployment
+- Status: Complete
+- Started: 2026-05-14
+- Completed: 2026-05-15
+
+**Deliverables:**
+- `docker-compose.yml` — extended to all 5 services (postgres, n8n, ollama, api, client)
+- `dashboard/api/Dockerfile` — `npm ci --omit=dev`, proper layer caching
+- `dashboard/client/Dockerfile` — multi-stage: Vite build → nginx serve
+- `dashboard/client/nginx.conf` — SPA routing + `/api` proxy to api:3001
+- `dashboard/api/.dockerignore`, `dashboard/client/.dockerignore`
+- `.env.example` — documented environment variable template
+
+**Architecture decisions:**
+- `qad-dashboard-api` container name (distinct from old `qad-api` container)
+- n8n database: `qad_db` (separate from automation data in `qad`)
+- n8n encryption key must match the value stored in the `docker_n8n_data` volume — never change after first run
+- Ollama data in `docker_ollama_data` external volume — referenced in compose to survive container recreation
+- GPU acceleration commented out by default — uncomment `deploy.resources` for NVIDIA hosts
+
+**Verified:**
+- `docker compose up -d` brings all 5 containers up cleanly
+- All 3 automation webhooks activate on n8n startup
+- Dashboard accessible at `http://localhost:80`; nginx proxies `/api` to dashboard API correctly
+
+**Open issues:** None
+
+**Review outcome:** Approved
+
+---
+
+### Phase 8 — Documentation & Handoff
+- Status: Complete
+- Started: 2026-05-15
+- Completed: 2026-05-15
+
+**Deliverables:**
+- `README.md` — project overview, quick start, service table, structure, dev setup
+- `docs/architecture.md` — system diagram, component details, data flow, classification model, network topology
+- `docs/operator-guide.md` — dashboard walkthrough, daily checklist, exception handling, client management, troubleshooting
+- `docs/deployment-guide.md` — local and production setup, SSL/proxy, GPU, backup/restore, env var reference, troubleshooting
+- `CHANGELOG.md` — phase-by-phase build history (Phases 0–8)
+- `CLAUDE.md` updated with Phase 7 and 8 history
+
+**Open issues:** None
+**Risks:** None
+**Review outcome:** Pending
 
 ## Skill routing
 
