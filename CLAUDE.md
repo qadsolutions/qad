@@ -1,252 +1,184 @@
-# CLAUDE.md — Private Multi-Tenant RAG Platform for Small Businesses
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ---
 
 ## Project Objective
 
-Build a private, multi-tenant RAG (Retrieval-Augmented Generation) platform that
-lets small service businesses run their own domain-aware AI agents. Each client
-gets a secure, isolated workspace. The owner controls everything from a central
-admin dashboard. No client data touches public LLM APIs.
-
-This is both a technical product and a business. The goal is a working prototype
-that can be demoed to real clients (junk removal, auto repair, plumbing, HVAC,
-pest control, landscaping) and converted into paying monthly subscriptions.
+Build a private, multi-tenant RAG (Retrieval-Augmented Generation) platform for
+small service businesses. Each client gets a secure isolated workspace and AI agent
+grounded in their own knowledge. The owner controls everything from a central admin
+dashboard. No client data touches public LLM APIs.
 
 See `business_description.md` for the business model and go-to-market context.
 See `design.md` for the full product design and discovery session output.
 
 ---
 
-## What We Are Building
+## Infrastructure Commands
 
-You are a senior full-stack AI systems architect.
+### Start all services
+```bash
+docker compose up -d
+```
 
-Build a multi-tenant private RAG platform for small businesses. The product should
-let the owner orchestrate everything centrally while each client has their own
-secure login, isolated workspace, and separated data. The goal is to prototype a
-business-aware AI system that can answer questions from a company's own documents,
-FAQs, SOPs, pricing sheets, and knowledge base without leaking data between clients.
+### Stop all services
+```bash
+docker compose down
+```
 
-### CORE GOAL
-- Create a private, multi-tenant AI knowledge platform for small businesses.
-- Each client gets their own tenant, login, document space, and vector namespace.
-- The owner gets an admin dashboard to manage all tenants, monitor usage, review
-  logs, update configs, and control deployments.
-- The system should be designed for future migration to cloud, but can start
-  self-hosted or on a private server for prototyping.
-- Avoid sending client data to public LLM APIs. Use a private inference server
-  or local model endpoint.
+### View logs
+```bash
+docker compose logs -f           # all services
+docker compose logs -f postgres  # specific service
+```
 
-### HIGH-LEVEL ARCHITECTURE
-- Frontend: web app for client portal and owner admin.
-- Backend API: handles auth, tenant separation, document ingestion, retrieval,
-  generation, logging, and admin actions.
-- Auth: secure login with tenant-based access control.
-- Database: PostgreSQL for users, tenants, documents, logs, permissions, settings.
-- Vector store: pgvector or a private vector database with strict tenant filtering.
-- Model layer: private inference server running a local or self-hosted LLM.
-- Inference access: app backend calls the model server privately; no raw client
-  data goes to a public model API.
-- Optional workflow layer: n8n for downstream automations later.
-- Optional deployment: Vercel for frontend only, not for hosting the model.
+### Connect to PostgreSQL directly
+```bash
+docker exec -it qad_postgres psql -U qad_user -d qad
+```
 
-### RAG FLOW
-1. User asks a question in their client portal.
-2. Backend validates tenant and user permissions.
-3. Backend retrieves only that tenant's relevant document chunks from vector store.
-4. Backend constructs a prompt with system instructions, user question, and context.
-5. Backend sends the prompt to the private inference server.
-6. Model returns answer.
-7. Backend stores request, response, retrieved chunks, timestamps, and audit logs.
-8. Backend returns answer to the user.
+### Pull and run the local LLM (first time or after volume wipe)
+```bash
+docker exec qad-ollama ollama pull llama3.2
+```
 
-### TENANT ISOLATION REQUIREMENTS
-- Every record must include tenant_id.
-- Every retrieval query must filter by tenant_id.
-- Each client must only see their own data, documents, chats, and logs.
-- Use separate namespaces per tenant or physically separate indexes/collections.
-- Add metadata filters and permission checks on every query.
-- Maintain audit logs for all retrievals and model calls.
+### Check Ollama models available
+```bash
+docker exec qad-ollama ollama list
+```
 
-### PRIVATE INFERENCE SERVER REQUIREMENTS
-- The model server should be isolated from public internet exposure.
-- It should expose an authenticated API endpoint only to the backend.
-- Can run locally, on a dedicated server, or on a private cloud GPU instance.
-- Support OpenAI-compatible API if possible for easier model swapping.
-- Good candidates: Ollama, vLLM, llama.cpp, LM Studio, or similar.
-- Keep prompts, retrieved context, and outputs inside the controlled environment.
-
-### RECOMMENDED MVP STACK
-- Frontend: Next.js or similar
-- Backend: Node.js or Python API service
-- Auth: Clerk, Supabase Auth, or custom tenant auth if self-hosted
-- Database: PostgreSQL
-- Vector storage: pgvector
-- Inference server: private self-hosted model runtime (Ollama already running)
-- Deployment (app layer): Vercel or similar
-- Deployment (model layer): private server or cloud GPU
-- File storage: private object storage or local disk for uploaded docs
-- Logging/monitoring: structured logs, audit trail, and admin dashboard
-
-### OWNER/ADMIN CAPABILITIES
-- Create, edit, delete tenants
-- Assign client users
-- Upload or approve knowledge sources
-- Configure prompts, response tone, and business rules
-- View logs, retrieval history, and low-confidence answers
-- Manage model endpoint and system settings
-- Review failures, outages, or data issues
-- Control updates and versioning
-
-### CLIENT PORTAL CAPABILITIES
-- Secure login
-- View and query company knowledge
-- Upload documents if allowed
-- See responses, logs, and permitted content
-- No access to other tenants
-- Optional feedback buttons for answer quality
-
-### DATABASE ENTITIES
-- tenants
-- users
-- roles
-- documents
-- document_chunks
-- embeddings
-- conversations
-- retrieval_logs
-- model_calls
-- audit_logs
-- settings
-- workflows
-- permissions
-
-### DOCUMENT INGESTION
-- Support PDF, DOCX, TXT, markdown, and FAQ content
-- Parse and chunk documents
-- Generate embeddings locally or through a private embedding service
-- Store chunk text + metadata + tenant_id
-- Re-index when documents change
-- Track source document version and timestamp
-
-### SECURITY REQUIREMENTS
-- Do not leak one tenant's context into another tenant's retrieval
-- Do not expose raw documents to public model APIs
-- Protect secrets with environment variables
-- Use RBAC or tenant-scoped authorization
-- Log access to documents and model calls
-- Add rate limiting and abuse protection
-- Support deletion and retention policies
-- Support backups and recovery
-
-### DEPLOYMENT MODEL
-- Prototype can start self-hosted on one private server
-- App frontend can later move to Vercel
-- Model inference should remain in a private environment
-- Architecture should be containerized with Docker
-- Keep configs portable for future cloud migration
-- Do not hardcode tenant-specific logic into the core
-
-### BUILD ORDER
-1. Set up auth and tenant model
-2. Build PostgreSQL schema
-3. Build document ingestion and chunking
-4. Build vector search with tenant filtering
-5. Build private inference server connection
-6. Build RAG answer endpoint
-7. Build client portal
-8. Build owner admin dashboard
-9. Add logs, audit trail, and monitoring
-10. Add config-based multi-client management
-11. Add deployment scripts and environment config
-12. Add workflow hooks for future automations
-
-### OUTPUTS NEEDED
-- Architecture diagram in text form
-- Folder structure
-- Database schema
-- API route list
-- Ingestion pipeline steps
-- Retrieval pipeline steps
-- Security design
-- Deployment instructions
-- MVP roadmap
-
-### CONSTRAINTS
-- Start from scratch
-- Keep it private and multi-tenant
-- Keep the owner in control
-- No public LLM API for raw client knowledge
-- Build for small business use case, not enterprise-only
-- Simple enough to prototype, structured enough to scale later
+> **Note:** `docker-compose.yml` currently references `./dashboard/api` and
+> `./dashboard/client` which no longer exist. These services (`api`, `client`)
+> must be removed or replaced when the new platform is scaffolded. The three
+> core services — `postgres`, `n8n`, `ollama` — are valid and ready.
 
 ---
 
-## Infrastructure Available
+## Architecture
 
-### PostgreSQL (existing Docker container)
-- Host: `localhost:5433`
-- Database: `qad`
-- User: `qad_user`
-- Password: `changeme`
-- Connect: `docker exec qad_postgres psql -U qad_user -d qad`
+### What We Are Building
 
-### n8n (existing)
-- URL: `http://localhost:5678`
-- Admin password: `Qad_secure_pass1`
+A private multi-tenant RAG platform. Small service businesses (junk removal, auto
+repair, plumbing, HVAC, landscaping) get an AI agent that knows their pricing,
+service area, policies, and workflows. The owner manages all clients from one
+admin dashboard.
 
-### Ollama (existing — private inference server)
-- URL: `http://localhost:11434`
-- Model: llama3.2
-- This IS the private inference server referenced in the architecture above
+### Core Data Flow
 
-### Docker Services
-| Container | Purpose | Port |
+```
+Client asks question in portal
+  → Backend validates tenant + permissions
+  → pgvector retrieves only that tenant's document chunks
+  → Backend builds prompt (system instructions + question + retrieved context)
+  → Private Ollama inference server generates answer
+  → Backend logs request, response, chunks, timestamps
+  → Answer returned to client
+```
+
+### Tenant Isolation
+
+Every database record carries `tenant_id`. Every vector retrieval query filters by
+`tenant_id`. Clients are physically separated via distinct pgvector schemas — one
+schema per tenant. This must be enforced at the query layer, not just the app layer.
+
+### Stack
+
+| Layer | Technology | Status |
 |---|---|---|
-| `qad_postgres` | PostgreSQL + pgvector | 5433 → 5432 |
-| `qad-n8n` | n8n workflow engine | 5678 |
-| `qad-ollama` | Local LLM (llama3.2) | 11434 |
+| Private LLM | Ollama (llama3.2) | Running — localhost:11434 |
+| Workflow engine | n8n | Running — localhost:5678 |
+| Database | PostgreSQL 16 + pgvector | Running — localhost:5433 |
+| Vector store | pgvector (in PostgreSQL) | Extension needed on new schema |
+| Backend API | Node.js or Python — not built yet | — |
+| Frontend | Next.js or React — not built yet | — |
+| Auth | Not decided (Clerk, Supabase Auth, or custom) | — |
+
+### Key Architectural Decisions
+
+- **pgvector over a separate vector DB** — keeps the stack simple, reuses existing
+  PostgreSQL container. Revisit at 10+ clients if retrieval latency becomes an issue.
+- **Ollama as inference server** — already running, OpenAI-compatible API, keeps all
+  client data private. No raw prompts or documents go to external APIs.
+- **Tenant isolation via schema separation** — each client gets their own pgvector
+  schema. This must be decided and implemented before signing client 2.
+- **n8n for downstream automations** — not part of the core RAG flow, but available
+  for post-answer workflows (CRM updates, notifications, scheduling triggers).
+
+### Database Entities (planned)
+
+`tenants` · `users` · `roles` · `documents` · `document_chunks` · `embeddings` ·
+`conversations` · `retrieval_logs` · `model_calls` · `audit_logs` · `settings` ·
+`workflows` · `permissions`
+
+### Document Ingestion Pipeline (planned)
+
+1. Accept PDF, DOCX, TXT, markdown, FAQ
+2. Parse and chunk by token count with overlap
+3. Generate embeddings via Ollama (private, no external API)
+4. Store chunk text + metadata + `tenant_id` in pgvector
+5. Re-index on document update; track source version and timestamp
+
+### Build Order
+
+1. Auth + tenant model
+2. PostgreSQL schema + pgvector per-tenant namespaces
+3. Document ingestion + chunking pipeline
+4. Vector search with tenant filtering
+5. Ollama inference connection + RAG answer endpoint
+6. Client portal (secure login, chat interface, document upload)
+7. Owner admin dashboard (tenant management, logs, config)
+8. Audit trail + monitoring
+9. Docker deployment config
+10. n8n workflow hooks
+
+---
+
+## Service Endpoints (dev)
+
+| Service | URL | Credentials |
+|---|---|---|
+| PostgreSQL | localhost:5433 | qad_user / changeme |
+| n8n | http://localhost:5678 | admin / Qad_secure_pass1 |
+| Ollama | http://localhost:11434 | no auth |
+
+> Production credentials must be set via `.env`. Never commit `.env`.
+> `N8N_ENCRYPTION_KEY` must not change after first n8n run — it decrypts stored credentials.
 
 ---
 
 ## Skill Routing
 
 When the user's request matches an available skill, invoke it via the Skill tool.
-The skill has multi-step workflows, checklists, and quality gates that produce
-better results than an ad-hoc answer. When in doubt, invoke the skill. A false
-positive is cheaper than a false negative.
+A false positive is cheaper than a false negative.
 
-Key routing rules:
-- Product ideas, "is this worth building", brainstorming → invoke /office-hours
-- Strategy, scope, "think bigger", "what should we build" → invoke /plan-ceo-review
-- Architecture, "does this design make sense" → invoke /plan-eng-review
-- Design system, brand, "how should this look" → invoke /design-consultation
-- Design review of a plan → invoke /plan-design-review
-- Developer experience of a plan → invoke /plan-devex-review
-- "Review everything", full review pipeline → invoke /autoplan
-- Bugs, errors, "why is this broken", "wtf", "this doesn't work" → invoke /investigate
-- Test the site, find bugs, "does this work" → invoke /qa (or /qa-only for report only)
-- Code review, check the diff, "look at my changes" → invoke /review
-- Visual polish, design audit, "this looks off" → invoke /design-review
-- Developer experience audit, try onboarding → invoke /devex-review
-- Ship, deploy, create a PR, "send it" → invoke /ship
-- Merge + deploy + verify → invoke /land-and-deploy
-- Configure deployment → invoke /setup-deploy
-- Post-deploy monitoring → invoke /canary
-- Update docs after shipping → invoke /document-release
-- Weekly retro, "how'd we do" → invoke /retro
-- Second opinion, codex review → invoke /codex
-- Safety mode, careful mode, lock it down → invoke /careful or /guard
-- Restrict edits to a directory → invoke /freeze or /unfreeze
-- Upgrade gstack → invoke /gstack-upgrade
-- Save progress, "save my work" → invoke /context-save
-- Resume, restore, "where was I" → invoke /context-restore
-- Security audit, OWASP, "is this secure" → invoke /cso
-- Make a PDF, document, publication → invoke /make-pdf
-- Launch real browser for QA → invoke /open-gstack-browser
-- Import cookies for authenticated testing → invoke /setup-browser-cookies
-- Performance regression, page speed, benchmarks → invoke /benchmark
-- Review what gstack has learned → invoke /learn
-- Tune question sensitivity → invoke /plan-tune
-- Code quality dashboard → invoke /health
+- Product ideas, brainstorming → `/office-hours`
+- Strategy, scope, "think bigger" → `/plan-ceo-review`
+- Architecture, "does this design make sense" → `/plan-eng-review`
+- Design system, brand → `/design-consultation`
+- Design review of a plan → `/plan-design-review`
+- Developer experience of a plan → `/plan-devex-review`
+- Full review pipeline → `/autoplan`
+- Bugs, errors, "why is this broken" → `/investigate`
+- Test the site, find bugs → `/qa` (or `/qa-only` for report only)
+- Code review, check the diff → `/review`
+- Visual polish, design audit → `/design-review`
+- Developer experience audit → `/devex-review`
+- Ship, deploy, create a PR → `/ship`
+- Merge + deploy + verify → `/land-and-deploy`
+- Configure deployment → `/setup-deploy`
+- Post-deploy monitoring → `/canary`
+- Update docs after shipping → `/document-release`
+- Weekly retro → `/retro`
+- Second opinion → `/codex`
+- Safety mode, lock it down → `/careful` or `/guard`
+- Restrict edits to a directory → `/freeze` or `/unfreeze`
+- Upgrade gstack → `/gstack-upgrade`
+- Save progress → `/context-save`
+- Resume, restore → `/context-restore`
+- Security audit, OWASP → `/cso`
+- Make a PDF → `/make-pdf`
+- Launch real browser for QA → `/open-gstack-browser`
+- Performance regression → `/benchmark`
+- Code quality dashboard → `/health`
