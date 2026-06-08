@@ -20,7 +20,7 @@ Each milestone maps to a GitHub Milestone. Update the status column when a miles
 | M9 | Audit Trail + Monitoring | Week 13 | 🔲 Pending |
 | M10 | Production Deploy + Hardening | Week 14–16 | 🔲 Pending |
 
-Status key: 🔲 Pending · 🟡 In Progress · ✅ Complete
+Status key: 🔲 Pending · 🟡 In Progress · ✅ Complete · ❌ Blocked
 
 ---
 
