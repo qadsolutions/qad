@@ -1,0 +1,124 @@
+name: CI
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main, dev]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  typecheck:
+    name: TypeScript
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v3
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Type check
+        run: pnpm tsc --noEmit
+
+  lint:
+    name: ESLint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v3
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: pnpm eslint . --max-warnings 0
+
+  unit-tests:
+    name: Unit + Integration Tests (Vitest)
+    runs-on: ubuntu-latest
+    needs: [typecheck]
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_DB: qad_test
+          POSTGRES_USER: qad_user
+          POSTGRES_PASSWORD: testpassword
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql://qad_user:testpassword@localhost:5432/qad_test
+      SUPABASE_SERVICE_ROLE_KEY: test-placeholder
+      NEXT_PUBLIC_SUPABASE_URL: http://localhost:54321
+      NEXT_PUBLIC_SUPABASE_ANON_KEY: test-placeholder
+      INFERENCE_PROVIDER: mock
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v3
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run Vitest
+        run: pnpm vitest run --reporter=verbose
+
+      - name: Tenant isolation test (required)
+        run: pnpm vitest run tests/integration/tenant-isolation.test.ts --reporter=verbose
+
+  env-check:
+    name: NEXT_PUBLIC_ Secret Leak Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check for service_role key with NEXT_PUBLIC_ prefix
+        run: |
+          if grep -r "NEXT_PUBLIC_SUPABASE_SERVICE_ROLE_KEY" . --include="*.ts" --include="*.tsx" --include="*.js" --include="*.jsx" --include="*.env*"; then
+            echo "SECURITY VIOLATION: SUPABASE_SERVICE_ROLE_KEY must never have a NEXT_PUBLIC_ prefix"
+            exit 1
+          fi
+          echo "Clean: no service_role key exposed to client"
+
+      - name: Check .env files not committed
+        run: |
+          if git ls-files | grep -E '\.env\.local|\.env\.production'; then
+            echo "SECURITY VIOLATION: .env.local or .env.production committed to repo"
+            exit 1
+          fi
+          echo "Clean: no .env.local or .env.production in repo"

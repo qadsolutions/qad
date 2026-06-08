@@ -9,16 +9,79 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Build a private, multi-tenant RAG (Retrieval-Augmented Generation) platform for
 small service businesses. Each client gets a secure isolated workspace and AI agent
 grounded in their own knowledge. The owner controls everything from a central admin
-dashboard. No client data touches public LLM APIs.
+dashboard. No client data touches public LLM APIs in production.
 
 See `business_description.md` for the business model and go-to-market context.
 See `design.md` for the full product design and discovery session output.
+See `Final Report QAD Solutions.docx.pdf` for the complete architecture specification.
 
 ---
 
-## Infrastructure Commands
+## Stack (Decided — do not change without an eng review)
 
-### Start all services
+| Layer | Technology | Status |
+|---|---|---|
+| Frontend | Next.js 14+ (TypeScript, React, Tailwind CSS) | Not built yet |
+| Backend API | Next.js API Routes on Vercel Serverless (Pro tier) | Not built yet |
+| Database | Supabase (PostgreSQL 16 + pgvector + Auth + Storage) | Not set up yet |
+| Auth | Supabase Auth (JWT with tenant_id + role claims) | Not set up yet |
+| Vector store | pgvector inside Supabase (HNSW index) | Not set up yet |
+| Embeddings | Ollama nomic-embed-text (768-dim, local) | Running — localhost:11434 |
+| Inference (prototype) | Groq API (Llama 3.3 70B, free tier) — synthetic data ONLY | Available |
+| Inference (production) | Ollama + vLLM on private GPU server | Not provisioned yet |
+| Deployment | Vercel Pro (auto-deploys on push to main) | Not configured yet |
+| Demo tunnel | Cloudflare Tunnel pointing to local Ollama | Not configured yet |
+| Workflow automations | n8n — deferred, out of scope for M1-M7 | Running — localhost:5678 |
+| Containerization | Docker (local dev infra: Ollama + n8n) | Running |
+| AI SDK | Vercel AI SDK (OpenAI-compatible, handles streaming) | Not installed yet |
+| Testing | Vitest + Playwright + Supertest | Not set up yet |
+
+### TypeScript requirement
+
+All code MUST use `strict: true` in `tsconfig.json`. Non-negotiable.
+`create-next-app` sets this by default — do not remove it.
+
+---
+
+## Security Rules (non-negotiable)
+
+### Supabase key naming — CRITICAL
+
+Supabase provides two keys with completely different security properties:
+
+| Key | Env var name | Can use in browser? | Notes |
+|---|---|---|---|
+| anon key | `NEXT_PUBLIC_SUPABASE_ANON_KEY` | YES — designed to be public | Works only within RLS policies |
+| service_role key | `SUPABASE_SERVICE_ROLE_KEY` | **NEVER** — bypasses ALL RLS | Server-side API routes only |
+
+**The service_role key must NEVER have a `NEXT_PUBLIC_` prefix.**
+If it is named with `NEXT_PUBLIC_`, it is bundled into client JavaScript and visible to every
+user in browser DevTools. This collapses the entire tenant isolation model.
+
+### Groq API — synthetic data only
+
+Groq API sends query context to Groq's external servers. This violates the core privacy guarantee.
+
+**Rule:** Groq may only be used with synthetic or fabricated test data.
+Real business documents, pricing sheets, or SOPs must NEVER be ingested while `INFERENCE_PROVIDER=groq`.
+
+The switch to Ollama production occurs before any real client data is loaded.
+Set `INFERENCE_PROVIDER=ollama` and point `OLLAMA_BASE_URL` to the Cloudflare Tunnel for all real-data use.
+
+### Tenant isolation — enforced at two layers
+
+1. **Database layer:** RLS policies on every Supabase table filter by `auth.jwt()->>'tenant_id'`
+2. **API layer:** Tenant middleware validates `tenant_id` from JWT on every API route before any DB query
+
+The cross-tenant isolation integration test is a **M1 exit criterion.**
+M1 is not complete until this test passes on CI. The test: create Tenant A and Tenant B,
+insert documents for each, query using Tenant A credentials, assert zero Tenant B chunks returned.
+
+---
+
+## Infrastructure Commands (local dev)
+
+### Start local dev services
 ```bash
 docker compose up -d
 ```
@@ -30,121 +93,181 @@ docker compose down
 
 ### View logs
 ```bash
-docker compose logs -f           # all services
-docker compose logs -f postgres  # specific service
+docker compose logs -f         # all services
+docker compose logs -f ollama  # specific service
 ```
 
-### Connect to PostgreSQL directly
+### Pull models (first time or after volume wipe)
 ```bash
-docker exec -it qad_postgres psql -U qad_user -d qad
-```
-
-### Pull and run the local LLM (first time or after volume wipe)
-```bash
+docker exec qad-ollama ollama pull nomic-embed-text
 docker exec qad-ollama ollama pull llama3.2
 ```
 
-### Check Ollama models available
+### Check available models
 ```bash
 docker exec qad-ollama ollama list
 ```
 
-> **Note:** `docker-compose.yml` currently references `./dashboard/api` and
-> `./dashboard/client` which no longer exist. These services (`api`, `client`)
-> must be removed or replaced when the new platform is scaffolded. The three
-> core services — `postgres`, `n8n`, `ollama` — are valid and ready.
+### Local service endpoints
+
+| Service | URL | Credentials |
+|---|---|---|
+| Ollama (inference + embeddings) | http://localhost:11434 | no auth |
+| n8n (deferred) | http://localhost:5678 | admin / Qad_secure_pass1 |
+
+> `N8N_ENCRYPTION_KEY` must not change after first n8n run — it decrypts stored credentials.
+> Local PostgreSQL (localhost:5433) is for local dev only. Supabase is the production database.
 
 ---
 
 ## Architecture
 
-### What We Are Building
-
-A private multi-tenant RAG platform. Small service businesses (junk removal, auto
-repair, plumbing, HVAC, landscaping) get an AI agent that knows their pricing,
-service area, policies, and workflows. The owner manages all clients from one
-admin dashboard.
-
 ### Core Data Flow
 
 ```
-Client asks question in portal
-  → Backend validates tenant + permissions
-  → pgvector retrieves only that tenant's document chunks
-  → Backend builds prompt (system instructions + question + retrieved context)
-  → Private Ollama inference server generates answer
-  → Backend logs request, response, chunks, timestamps
-  → Answer returned to client
+Client submits question in Client Portal
+  → Next.js API Route (Vercel Serverless)
+  → Auth Middleware: validate JWT, extract tenant_id + role
+  → Tenant Validator: confirm user has query permission for this tenant
+  → RAG Engine: generate embedding for question (Ollama nomic-embed-text)
+  → pgvector: similarity search filtered strictly by tenant_id (HNSW index)
+  → RAG Engine: construct prompt (system instructions + retrieved chunks + question)
+  → Inference server: stream response (Groq prototype / Ollama production)
+  → Vercel AI SDK: stream tokens to browser via Server-Sent Events
+  → Audit Logger: record user_id, tenant_id, question, chunk_ids, response, timestamp
 ```
 
-### Tenant Isolation
+### Document Ingestion Pipeline (async — IMPORTANT)
 
-Every database record carries `tenant_id`. Every vector retrieval query filters by
-`tenant_id`. Clients are physically separated via distinct pgvector schemas — one
-schema per tenant. This must be enforced at the query layer, not just the app layer.
+**Upload returns 202 Accepted immediately.** Chunking and embedding run in a background process.
+The `documents` table tracks status: `uploading | processing | ready | error`.
 
-### Stack
+```
+POST /api/documents/upload
+  → Validate file type (PDF, DOCX, TXT, MD) and size (max 50MB)
+  → Store raw file in Supabase Storage
+  → Create document record with status: processing
+  → Return 202 Accepted + document_id
 
-| Layer | Technology | Status |
-|---|---|---|
-| Private LLM | Ollama (llama3.2) | Running — localhost:11434 |
-| Workflow engine | n8n | Running — localhost:5678 |
-| Database | PostgreSQL 16 + pgvector | Running — localhost:5433 |
-| Vector store | pgvector (in PostgreSQL) | Extension needed on new schema |
-| Backend API | Node.js or Python — not built yet | — |
-| Frontend | Next.js or React — not built yet | — |
-| Auth | Not decided (Clerk, Supabase Auth, or custom) | — |
+Background process:
+  → Parse document (pdfjs-dist for PDF, mammoth.js for DOCX)
+  → Chunk by token count with overlap
+  → For each chunk: call Ollama nomic-embed-text → 768-dim vector
+  → Bulk insert into document_chunks + embeddings (with tenant_id)
+  → Update document status: ready
+  → On any failure: update status: error, log error detail
+```
 
-### Key Architectural Decisions
+Re-ingestion on document update: delete ALL old chunks and embeddings for that document_id
+before inserting new ones. Orphaned old vectors cause stale chunks in retrieval.
 
-- **pgvector over a separate vector DB** — keeps the stack simple, reuses existing
-  PostgreSQL container. Revisit at 10+ clients if retrieval latency becomes an issue.
-- **Ollama as inference server** — already running, OpenAI-compatible API, keeps all
-  client data private. No raw prompts or documents go to external APIs.
-- **Tenant isolation via schema separation** — each client gets their own pgvector
-  schema. This must be decided and implemented before signing client 2.
-- **n8n for downstream automations** — not part of the core RAG flow, but available
-  for post-answer workflows (CRM updates, notifications, scheduling triggers).
+### pgvector Index
 
-### Database Entities (planned)
+Use HNSW, not IVFFlat. Add this to the M2 migration:
 
-`tenants` · `users` · `roles` · `documents` · `document_chunks` · `embeddings` ·
-`conversations` · `retrieval_logs` · `model_calls` · `audit_logs` · `settings` ·
-`workflows` · `permissions`
+```sql
+CREATE INDEX ON embeddings USING hnsw (embedding vector_cosine_ops)
+WITH (ef_construction = 64, m = 16);
+```
 
-### Document Ingestion Pipeline (planned)
+HNSW handles dynamic datasets (documents added continuously by tenants) without requiring
+VACUUM maintenance or upfront `lists` parameter tuning. IVFFlat degrades over time without it.
 
-1. Accept PDF, DOCX, TXT, markdown, FAQ
-2. Parse and chunk by token count with overlap
-3. Generate embeddings via Ollama (private, no external API)
-4. Store chunk text + metadata + `tenant_id` in pgvector
-5. Re-index on document update; track source version and timestamp
+### Database Schema (11 tables)
 
-### Build Order
+| Table | Key fields |
+|---|---|
+| `tenants` | id, name, plan_tier, settings (JSONB), is_active |
+| `users` | id, tenant_id (FK), email, role (admin/user/platform_admin) |
+| `documents` | id, tenant_id (FK), filename, file_type, storage_path, version, status |
+| `document_chunks` | id, document_id (FK), tenant_id (FK), chunk_text, chunk_index, token_count |
+| `embeddings` | id, chunk_id (FK), tenant_id (FK), embedding (vector 768), model_version |
+| `conversations` | id, user_id (FK), tenant_id (FK), created_at, title |
+| `messages` | id, conversation_id (FK), tenant_id (FK), role, content, created_at |
+| `retrieval_logs` | id, message_id (FK), tenant_id (FK), chunk_ids (array), similarity_scores |
+| `model_calls` | id, tenant_id (FK), user_id (FK), model_name, prompt_tokens, completion_tokens, latency_ms |
+| `audit_logs` | id, tenant_id (FK), user_id (FK), action, resource_type, ip_address, created_at |
+| `settings` | id, tenant_id (FK), key, value, updated_by |
 
-1. Auth + tenant model
-2. PostgreSQL schema + pgvector per-tenant namespaces
-3. Document ingestion + chunking pipeline
-4. Vector search with tenant filtering
-5. Ollama inference connection + RAG answer endpoint
-6. Client portal (secure login, chat interface, document upload)
-7. Owner admin dashboard (tenant management, logs, config)
-8. Audit trail + monitoring
-9. Docker deployment config
-10. n8n workflow hooks
+### n8n (deferred — do not integrate before M7 is complete)
+
+n8n is reserved for post-answer automations (scheduling handoffs, CRM updates, lead capture).
+No role in M1-M7. Do not integrate until customer discovery validates a specific automation use case.
 
 ---
 
-## Service Endpoints (dev)
+## Build Order (Milestones)
 
-| Service | URL | Credentials |
-|---|---|---|
-| PostgreSQL | localhost:5433 | qad_user / changeme |
-| n8n | http://localhost:5678 | admin / Qad_secure_pass1 |
-| Ollama | http://localhost:11434 | no auth |
+```
+M1  → Auth + Tenant Model          Supabase Auth, JWT + tenant_id claims, RLS policies
+M2  → Database Schema + API        All 11 tables, RLS enabled, base API routes
+M3  → Document Ingestion           Async pipeline: upload → chunk → embed → pgvector
+M4  → RAG Query Endpoint           Vector search, prompt builder, stream, audit log
+        ↓ parallel after M4 ↓
+M5  → Client Portal UI             app/portal/ — chat, citations, conversation history
+M6  → Admin Dashboard UI           app/admin/ — doc upload, user mgmt, audit log
+        ↓ merge both, then ↓
+M7  → Platform Admin Dashboard     Multi-tenant oversight, usage metrics, billing tier controls
+M8  → Testing and QA               Full coverage, security testing, benchmarks
+M9  → Production Deployment        Private Ollama server, Vercel production, env hardening
+M10 → Beta Client Onboarding       First 3 clients, white-glove setup
+```
 
-> Production credentials must be set via `.env`. Never commit `.env`.
-> `N8N_ENCRYPTION_KEY` must not change after first n8n run — it decrypts stored credentials.
+**M1 exit criterion:** Cross-tenant isolation integration test must pass before M2 begins.
+
+**M5 + M6 can run in parallel worktrees** — `app/portal/` and `app/admin/` are separate
+directories with no shared code during those milestones.
+
+---
+
+## Testing
+
+**Framework:** Vitest (unit + integration) + Playwright (E2E) + Supertest (API routes)
+
+Set up Vitest at M1, not M8. The cross-tenant isolation test runs on every PR from M1 onwards.
+
+Coverage requirements:
+- Every API route: auth, tenant validation, correct error codes
+- Tenant isolation: Tenant A cannot retrieve Tenant B chunks under any condition
+- Document ingestion: all file types, size limits, partial failure recovery
+- RAG pipeline: embedding generation, retrieval accuracy, prompt construction
+- E2E: login flow, document upload + query, admin audit log review
+
+---
+
+## Performance Targets
+
+| Metric | Target |
+|---|---|
+| First token (TTFT) | < 3 seconds |
+| Full query response | < 10 seconds |
+| Document ingestion (to 202 response) | < 2 seconds (async — background takes longer) |
+| Vector search | < 200ms (HNSW) |
+| Concurrent users (prototype) | 10 simultaneous |
+
+---
+
+## Environment Variables
+
+```
+# Supabase — safe to expose in browser (NEXT_PUBLIC_ prefix is correct here)
+NEXT_PUBLIC_SUPABASE_URL=
+NEXT_PUBLIC_SUPABASE_ANON_KEY=
+
+# Supabase — server-only, NEVER add NEXT_PUBLIC_ prefix
+SUPABASE_SERVICE_ROLE_KEY=
+
+# Inference
+INFERENCE_PROVIDER=groq        # prototype: groq | production: ollama
+GROQ_API_KEY=                  # synthetic data ONLY — never use with real client data
+OLLAMA_BASE_URL=               # Cloudflare Tunnel URL pointing to local Ollama
+
+# Embeddings
+EMBEDDING_MODEL=nomic-embed-text
+OLLAMA_EMBED_URL=              # same as OLLAMA_BASE_URL
+```
+
+Never commit `.env`. Always update `.env.example` when adding new variables.
 
 ---
 

@@ -81,42 +81,6 @@ services:
         aliases:
           - ollama
 
-  api:
-    build:
-      context: ./dashboard/api
-      dockerfile: Dockerfile
-    container_name: qad-dashboard-api
-    restart: unless-stopped
-    ports:
-      - "3001:3001"
-    environment:
-      PGHOST: postgres
-      PGPORT: 5432
-      PGDATABASE: ${POSTGRES_DB:-qad}
-      PGUSER: ${POSTGRES_USER:-qad_user}
-      PGPASSWORD: ${POSTGRES_PASSWORD:-changeme}
-      PORT: 3001
-      NODE_ENV: production
-    depends_on:
-      postgres:
-        condition: service_healthy
-    networks:
-      default: {}
-      qad-network:
-
-  client:
-    build:
-      context: ./dashboard/client
-      dockerfile: Dockerfile
-    container_name: qad-client
-    restart: unless-stopped
-    ports:
-      - "80:80"
-    depends_on:
-      - api
-    networks:
-      default: {}
-      qad-network:
 
 networks:
   default: {}

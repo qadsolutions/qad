@@ -1,0 +1,67 @@
+name: Milestone Tracker
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    # Runs every Monday at 9am UTC
+    - cron: '0 9 * * 1'
+  workflow_dispatch:
+
+jobs:
+  roadmap-summary:
+    name: Production Timeline Summary
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate milestone summary
+        run: |
+          echo "# QAD Solutions — Production Timeline" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Branch:** \`${{ github.ref_name }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Run date:** $(date -u '+%Y-%m-%d %H:%M UTC')" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## Milestone Status" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Milestone | Name | Target | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| M1 | Auth + Tenant Model | Week 1 | 🔲 Pending |" >> $GITHUB_STEP_SUMMARY
+          echo "| M2 | PostgreSQL Schema + pgvector | Week 2 | 🔲 Pending |" >> $GITHUB_STEP_SUMMARY
+          echo "| M3 | Document Ingestion Pipeline | Week 3–4 | 🔲 Pending |" >> $GITHUB_STEP_SUMMARY
+          echo "| M4 | Vector Search + RAG Endpoint | Week 5–6 | 🔲 Pending |" >> $GITHUB_STEP_SUMMARY
+          echo "| M5 | Ollama Inference + Streaming | Week 7 | 🔲 Pending |" >> $GITHUB_STEP_SUMMARY
+          echo "| M6 | Client Portal | Week 8–9 | 🔲 Pending |" >> $GITHUB_STEP_SUMMARY
+          echo "| M7 | Owner Admin Dashboard | Week 10–11 | 🔲 Pending |" >> $GITHUB_STEP_SUMMARY
+          echo "| M8 | E2E Testing + Playwright | Week 12 | 🔲 Pending |" >> $GITHUB_STEP_SUMMARY
+          echo "| M9 | Audit Trail + Monitoring | Week 13 | 🔲 Pending |" >> $GITHUB_STEP_SUMMARY
+          echo "| M10 | Production Deploy + Hardening | Week 14–16 | 🔲 Pending |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## Mermaid Gantt" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo '```mermaid' >> $GITHUB_STEP_SUMMARY
+          echo 'gantt' >> $GITHUB_STEP_SUMMARY
+          echo '    title QAD Solutions — Build Timeline' >> $GITHUB_STEP_SUMMARY
+          echo '    dateFormat  YYYY-MM-DD' >> $GITHUB_STEP_SUMMARY
+          echo '    axisFormat  %b %d' >> $GITHUB_STEP_SUMMARY
+          echo '' >> $GITHUB_STEP_SUMMARY
+          echo '    section Foundation' >> $GITHUB_STEP_SUMMARY
+          echo '    M1 Auth + Tenant Model        :m1, 2025-07-01, 7d' >> $GITHUB_STEP_SUMMARY
+          echo '    M2 Database Schema + pgvector  :m2, after m1, 7d' >> $GITHUB_STEP_SUMMARY
+          echo '' >> $GITHUB_STEP_SUMMARY
+          echo '    section Core RAG' >> $GITHUB_STEP_SUMMARY
+          echo '    M3 Document Ingestion          :m3, after m2, 14d' >> $GITHUB_STEP_SUMMARY
+          echo '    M4 Vector Search + RAG API     :m4, after m3, 14d' >> $GITHUB_STEP_SUMMARY
+          echo '    M5 Ollama Inference            :m5, after m4, 7d' >> $GITHUB_STEP_SUMMARY
+          echo '' >> $GITHUB_STEP_SUMMARY
+          echo '    section Product' >> $GITHUB_STEP_SUMMARY
+          echo '    M6 Client Portal               :m6, after m5, 14d' >> $GITHUB_STEP_SUMMARY
+          echo '    M7 Owner Admin Dashboard       :m7, after m6, 14d' >> $GITHUB_STEP_SUMMARY
+          echo '' >> $GITHUB_STEP_SUMMARY
+          echo '    section Hardening' >> $GITHUB_STEP_SUMMARY
+          echo '    M8 E2E Testing + Playwright    :m8, after m7, 7d' >> $GITHUB_STEP_SUMMARY
+          echo '    M9 Audit Trail + Monitoring    :m9, after m8, 7d' >> $GITHUB_STEP_SUMMARY
+          echo '    M10 Production Deploy          :m10, after m9, 14d' >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "_Update milestone status rows above as each milestone completes._" >> $GITHUB_STEP_SUMMARY
