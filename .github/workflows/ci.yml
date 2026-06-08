@@ -11,10 +11,26 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  check:
+    name: Detect app
+    runs-on: ubuntu-latest
+    outputs:
+      has_app: ${{ steps.detect.outputs.has_app }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: detect
+        run: |
+          if [ -f "package.json" ]; then
+            echo "has_app=true" >> $GITHUB_OUTPUT
+          else
+            echo "has_app=false" >> $GITHUB_OUTPUT
+          fi
+
   typecheck:
     name: TypeScript
     runs-on: ubuntu-latest
-    if: hashFiles('package.json') != ''
+    needs: [check]
+    if: needs.check.outputs.has_app == 'true'
     steps:
       - uses: actions/checkout@v4
 
@@ -37,7 +53,8 @@ jobs:
   lint:
     name: ESLint
     runs-on: ubuntu-latest
-    if: hashFiles('package.json') != ''
+    needs: [check]
+    if: needs.check.outputs.has_app == 'true'
     steps:
       - uses: actions/checkout@v4
 
@@ -60,8 +77,8 @@ jobs:
   unit-tests:
     name: Unit + Integration Tests (Vitest)
     runs-on: ubuntu-latest
-    needs: [typecheck]
-    if: hashFiles('package.json') != ''
+    needs: [check, typecheck]
+    if: needs.check.outputs.has_app == 'true'
     services:
       postgres:
         image: pgvector/pgvector:pg16
