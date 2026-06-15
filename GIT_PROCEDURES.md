@@ -7,20 +7,28 @@ must follow these procedures. No exceptions.
 
 ## Branch Strategy
 
+> **Current phase (pre-launch, M1–M8): single-tier flow.**
+> No `dev` branch yet. Feature branches are cut from `main` and PR'd straight back
+> into `main`. Branch protection on `main` (required CI + PR review) is the only gate
+> needed while there are no live deployments and no clients.
+>
+> **`dev` is introduced at M9**, when the production Vercel deploy goes live and `main`
+> must stay equal to "what the client sees." See [§ Introducing `dev` at M9](#introducing-dev-at-m9).
+
+### Current flow (now)
+
 ```
-main          ← production only. Protected. Never commit directly.
-dev           ← integration branch. All feature branches merge here first.
+main          ← protected. Cut feature branches from here; PR back into here.
 feature/*     ← active development. One branch per GitHub Issue.
-hotfix/*      ← emergency fixes to main only. Merge to both main and dev after.
+hotfix/*      ← same as feature/* for now (no separate prod line yet).
 ```
 
 ### Rules
 
-- **`main` is always deployable.** Every commit on main is a production release.
-- **`dev` is always CI-green.** Do not merge a feature branch to dev if CI is failing.
-- Feature branches are created from `dev`, not from `main`.
-- Hotfix branches are created from `main` and merged to both `main` and `dev`.
+- **`main` is always CI-green.** Do not merge a feature branch if CI is failing.
+- Feature branches are created from `main`.
 - Delete feature branches after merging.
+- No direct commits to `main` — branch protection enforces this. Always PR.
 
 ### Branch naming
 
@@ -113,20 +121,17 @@ feat(auth): implement Supabase JWT middleware with tenant_id extraction
 
 ### PR target
 
-- Feature branches → `dev`
-- Hotfix branches → `main` (and immediately also to `dev`)
-- `dev` → `main` for production releases only
+- **Now:** Feature branches → `main`. (Hotfixes are just feature branches until M9.)
+- **From M9:** Feature → `dev` → `main`. See [§ Introducing `dev` at M9](#introducing-dev-at-m9).
 
 ### Merge strategy
 
-- Feature → dev: **Squash merge** (keeps dev history clean)
-- dev → main: **Merge commit** (preserves milestone history for the production timeline)
-- Hotfix → main: **Merge commit**
+- Feature → main: **Squash merge** (one clean commit per Issue)
+- From M9, dev → main: **Merge commit** (preserves milestone history for the production timeline)
 
 ### Review
 
-- Every PR to `main` requires at least 1 approval.
-- PRs to `dev` require CI to pass but can self-merge on solo branches.
+- Solo phase: CI must be green; you may self-merge your own PR.
 - PRs that touch auth, tenant middleware, RLS policies, or the RAG engine require
   explicit verification that the cross-tenant isolation test is green.
 
@@ -166,10 +171,26 @@ Each build milestone (M1-M10) is a GitHub Milestone. All work is tracked as Issu
 ### Issue lifecycle
 
 1. Create Issue, assign to milestone, add labels
-2. Create feature branch from `dev`: `feature/m1-auth-tenant-model`
+2. Create feature branch from `main`: `feature/m1-auth-tenant-model`
 3. Reference Issue in every commit: `closes #12`
-4. Open PR targeting `dev` when ready
+4. Open PR targeting `main` when ready
 5. PR merge auto-closes the Issue
+
+---
+
+## Introducing `dev` at M9
+
+Once M9 (production deploy) lands, `main` becomes the live production line that
+auto-deploys to Vercel. At that point, add the `dev` integration tier:
+
+1. `git checkout main && git pull`
+2. `git checkout -b dev && git push -u origin dev`
+3. Add branch protection to `dev` (required CI, no force-push).
+4. From then on: `feature/*` → `dev` → `main`. Feature PRs target `dev`;
+   `dev` → `main` is the production release PR (merge commit, then tag).
+5. Update the Branch Strategy and PR target sections above to the two-tier flow.
+
+Until then, the single-tier `main` flow is the source of truth.
 
 ---
 
