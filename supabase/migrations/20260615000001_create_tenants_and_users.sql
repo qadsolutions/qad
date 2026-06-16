@@ -53,3 +53,13 @@ create policy "users: select own tenant"
   on public.users
   for select
   using (tenant_id = (auth.jwt() ->> 'tenant_id')::uuid);
+
+-- ---------------------------------------------------------------------------
+-- Grants
+-- RLS policies only filter rows — the role still needs table-level SELECT.
+-- anon has no access (no policies); authenticated is scoped by RLS above.
+-- service_role bypasses RLS entirely (used server-side for writes).
+-- ---------------------------------------------------------------------------
+
+grant select on public.tenants to authenticated;
+grant select on public.users   to authenticated;
