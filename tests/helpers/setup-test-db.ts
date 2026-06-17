@@ -1,18 +1,28 @@
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import type { Sql } from "postgres";
 
 const MIGRATIONS_DIR = resolve(process.cwd(), "supabase/migrations");
 
-// Applied in chronological order. The service_role grant migration
-// (20260616000002) is intentionally omitted — the test DB has no `service_role`
-// role and the isolation test exercises the RLS (anon-key) path, not service_role.
-// NOTE: new schema migrations must be added here so the test DB matches production.
-const MIGRATIONS_IN_ORDER = [
-  "20260615000001_create_tenants_and_users.sql",
-  "20260616000001_custom_access_token_hook.sql",
-  "20260617000001_nullable_tenant_id_platform_admin.sql",
-];
+// Migrations are auto-discovered from MIGRATIONS_DIR and applied in chronological
+// (filename) order — the same order Supabase applies them in production. New
+// migrations are picked up automatically; there is no list to maintain, so the
+// test DB can never silently drift from the real schema (which previously produced
+// false-green isolation runs against a stale schema).
+//
+// MIGRATION_DENYLIST is for the rare migration that genuinely cannot run in this
+// lightweight harness. Keep it EMPTY where possible — every entry is a gap in what
+// the test DB verifies — and give each one a reason. It is currently empty: the
+// service_role grant migration applies because bootstrapTestDatabase creates the
+// service_role role below.
+const MIGRATION_DENYLIST = new Set<string>();
+
+/** All on-disk migrations in chronological order, minus the denylist. */
+function migrationsToApply(): string[] {
+  return readdirSync(MIGRATIONS_DIR)
+    .filter((f) => f.endsWith(".sql") && !MIGRATION_DENYLIST.has(f))
+    .sort();
+}
 
 /**
  * Build the Supabase compatibility layer and apply all migrations.
@@ -43,6 +53,11 @@ export async function bootstrapTestDatabase(sql: Sql): Promise<void> {
     DO $$ BEGIN CREATE ROLE authenticated; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
     DO $$ BEGIN CREATE ROLE anon;           EXCEPTION WHEN duplicate_object THEN NULL; END $$;
     DO $$ BEGIN CREATE ROLE supabase_auth_admin NOINHERIT;
+                EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+    -- service_role: the server-side write path that bypasses RLS in production.
+    -- Created so the service_role grant migration applies and service_role writes
+    -- are exercised by tests (fidelity with production).
+    DO $$ BEGIN CREATE ROLE service_role NOINHERIT BYPASSRLS;
                 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
   `);
 
@@ -78,10 +93,10 @@ export async function bootstrapTestDatabase(sql: Sql): Promise<void> {
     GRANT EXECUTE ON FUNCTION auth.jwt()     TO authenticated;
   `);
 
-  // 6. Apply migrations in filename (chronological) order.
+  // 6. Apply every migration on disk in filename (chronological) order.
   //    sql.unsafe() is required for DDL — the postgres package disables
   //    parameterization for raw strings, which is correct for migration files.
-  for (const filename of MIGRATIONS_IN_ORDER) {
+  for (const filename of migrationsToApply()) {
     const migrationSql = readFileSync(resolve(MIGRATIONS_DIR, filename), "utf-8");
     await sql.unsafe(migrationSql);
   }
