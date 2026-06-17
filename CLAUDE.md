@@ -74,8 +74,12 @@ Set `INFERENCE_PROVIDER=ollama` and point `OLLAMA_BASE_URL` to the Cloudflare Tu
 2. **API layer:** Tenant middleware validates `tenant_id` from JWT on every API route before any DB query
 
 The cross-tenant isolation integration test is a **M1 exit criterion.**
-M1 is not complete until this test passes on CI. The test: create Tenant A and Tenant B,
-insert documents for each, query using Tenant A credentials, assert zero Tenant B chunks returned.
+M1 is not complete until this test passes on CI. Because the isolation mechanism
+(`JWT tenant_id` claim → RLS filter) is identical across all tenant-scoped tables, the M1
+test proves it on the tables that exist in M1: create Tenant A and Tenant B, seed each with
+its own user(s), query `users` using Tenant A credentials, assert zero Tenant B rows (and
+vice versa). The documents/chunks-specific isolation test moves to M2, once those tables
+exist (tracked as a separate M2 issue).
 
 ---
 
@@ -213,7 +217,8 @@ M9  → Production Deployment        Private Ollama server, Vercel production, e
 M10 → Beta Client Onboarding       First 3 clients, white-glove setup
 ```
 
-**M1 exit criterion:** Cross-tenant isolation integration test must pass before M2 begins.
+**M1 exit criterion:** Cross-tenant isolation integration test (on the M1 `tenants`/`users`
+tables) must pass before M2 begins. The documents/chunks-level isolation test is an M2 follow-up.
 
 **M5 + M6 can run in parallel worktrees** — `app/portal/` and `app/admin/` are separate
 directories with no shared code during those milestones.
