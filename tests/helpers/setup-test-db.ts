@@ -4,9 +4,14 @@ import type { Sql } from "postgres";
 
 const MIGRATIONS_DIR = resolve(process.cwd(), "supabase/migrations");
 
+// Applied in chronological order. The service_role grant migration
+// (20260616000002) is intentionally omitted — the test DB has no `service_role`
+// role and the isolation test exercises the RLS (anon-key) path, not service_role.
+// NOTE: new schema migrations must be added here so the test DB matches production.
 const MIGRATIONS_IN_ORDER = [
   "20260615000001_create_tenants_and_users.sql",
   "20260616000001_custom_access_token_hook.sql",
+  "20260617000001_nullable_tenant_id_platform_admin.sql",
 ];
 
 /**
