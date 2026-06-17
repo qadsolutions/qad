@@ -182,7 +182,7 @@ VACUUM maintenance or upfront `lists` parameter tuning. IVFFlat degrades over ti
 | Table | Key fields |
 |---|---|
 | `tenants` | id, name, plan_tier, settings (JSONB), is_active |
-| `users` | id, tenant_id (FK), email, role (admin/user/platform_admin) |
+| `users` | id, tenant_id (FK; nullable only for platform_admin — see Roles), email, role (user/admin/platform_admin) |
 | `documents` | id, tenant_id (FK), filename, file_type, storage_path, version, status |
 | `document_chunks` | id, document_id (FK), tenant_id (FK), chunk_text, chunk_index, token_count |
 | `embeddings` | id, chunk_id (FK), tenant_id (FK), embedding (vector 768), model_version |
@@ -192,6 +192,24 @@ VACUUM maintenance or upfront `lists` parameter tuning. IVFFlat degrades over ti
 | `model_calls` | id, tenant_id (FK), user_id (FK), model_name, prompt_tokens, completion_tokens, latency_ms |
 | `audit_logs` | id, tenant_id (FK), user_id (FK), action, resource_type, ip_address, created_at |
 | `settings` | id, tenant_id (FK), key, value, updated_by |
+
+### Roles & admin model
+
+Three roles (`users.role`), each with its own surface:
+
+| Role | Who | Surface | Scope |
+|---|---|---|---|
+| `user` | Staff at a client business | Client Portal (M6) | Their tenant (RLS) — chat/query only |
+| `admin` | Owner/manager of the client business | Owner Admin Dashboard (M7) | Their tenant (RLS) — manage docs, users, audit |
+| `platform_admin` | Us, the operator | Platform console (M11) | All tenants, via `service_role` (never RLS) |
+
+**Flat tenant admins:** a single `admin` role, no separate owner. Guard: the last active admin of a
+tenant cannot be deactivated or demoted (lockout prevention).
+
+**`platform_admin` has no tenant:** `users.tenant_id` is nullable *only* for this role
+(`CHECK (role = 'platform_admin' OR tenant_id IS NOT NULL)`). With no `tenant_id` claim they match no
+RLS policy (zero client rows through the normal client) and `withTenant` 403s them — platform routes
+use a separate `withPlatformAdmin` guard + `service_role` (SECURITY.md §3.4).
 
 ### n8n (deferred — do not integrate before M7 is complete)
 
@@ -203,25 +221,27 @@ No role in M1-M7. Do not integrate until customer discovery validates a specific
 ## Build Order (Milestones)
 
 ```
-M1  → Auth + Tenant Model          Supabase Auth, JWT + tenant_id claims, RLS policies
-M2  → Database Schema + API        All 11 tables, RLS enabled, base API routes
-M3  → Document Ingestion           Async pipeline: upload → chunk → embed → pgvector
-M4  → RAG Query Endpoint           Vector search, prompt builder, stream, audit log
-        ↓ parallel after M4 ↓
-M5  → Client Portal UI             app/portal/ — chat, citations, conversation history
-M6  → Admin Dashboard UI           app/admin/ — doc upload, user mgmt, audit log
-        ↓ merge both, then ↓
-M7  → Platform Admin Dashboard     Multi-tenant oversight, usage metrics, billing tier controls
-M8  → Testing and QA               Full coverage, security testing, benchmarks
-M9  → Production Deployment        Private Ollama server, Vercel production, env hardening
-M10 → Beta Client Onboarding       First 3 clients, white-glove setup
+M1  → Auth + Tenant Model              Supabase Auth, JWT tenant_id + user_role claims, RLS policies
+M2  → Database Schema + pgvector       All 11 tables, RLS, HNSW index, base API routes
+M3  → Document Ingestion Pipeline      Async: upload → chunk → embed → pgvector (returns 202)
+M4  → RAG Query Endpoint               Vector search, prompt builder, streaming, retrieval/model-call logs
+M5  → Ollama Inference + Streaming     Provider abstraction (groq|ollama), Cloudflare Tunnel, SSE
+M6  → Client Portal                    app/portal/ — chat, citations, upload UI, conversation history
+M7  → Owner Admin Dashboard            app/admin/ — per-tenant doc/user mgmt, audit log, usage
+M8  → E2E Testing + Playwright         Login, upload, query, admin flows
+M9  → Audit Trail + Monitoring         Append-only audit_logs, 90-day retention, error alerting
+M10 → Production Deploy + Hardening    Vercel Pro, private Ollama server, env hardening, first client
+M11 → Platform Admin + Observability   Operator console: cross-tenant usage, pipeline diagnostics, provisioning, plan_tier
 ```
 
 **M1 exit criterion:** Cross-tenant isolation integration test (on the M1 `tenants`/`users`
 tables) must pass before M2 begins. The documents/chunks-level isolation test is an M2 follow-up.
 
-**M5 + M6 can run in parallel worktrees** — `app/portal/` and `app/admin/` are separate
-directories with no shared code during those milestones.
+> **Source of truth:** the GitHub Milestones (qadsolutions/qad, M1–M11) are authoritative for
+> scope and sequencing; this list mirrors them.
+
+**M6 + M7 can run in parallel worktrees** — `app/portal/` (Client Portal) and `app/admin/`
+(Owner Admin) are separate directories with no shared code during those milestones.
 
 ---
 
