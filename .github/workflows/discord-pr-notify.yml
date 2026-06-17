@@ -1,0 +1,22 @@
+name: Discord PR Notification
+
+on:
+  pull_request:
+    types: [opened]
+    branches: [main]
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post to Discord
+        env:
+          WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          jq -n \
+            --arg content "PR #${PR_NUMBER} submitted, awaiting review" \
+            '{content: $content}' | \
+          curl -s -X POST "$WEBHOOK_URL" \
+            -H "Content-Type: application/json" \
+            -d @-
