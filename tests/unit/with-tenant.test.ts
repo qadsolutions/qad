@@ -84,6 +84,40 @@ describe("withTenant", () => {
     expect(handler).not.toHaveBeenCalled();
   });
 
+  it("returns 403 for a platform_admin token (no tenant — must use the platform route)", async () => {
+    const handler = vi.fn();
+    const route = withTenant(handler, {
+      // Normal platform_admin: tenant-less, so the hook omits tenant_id entirely.
+      createClient: async () =>
+        mockSupabase({ claims: { sub: USER_B, role: "authenticated", user_role: "platform_admin" } }),
+    });
+
+    const res = await route(fakeRequest);
+
+    expect(res.status).toBe(403);
+    await expect(res.json()).resolves.toMatchObject({ error: "forbidden" });
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it("rejects a platform_admin token even if it carries a tenant_id (confused-deputy)", async () => {
+    const handler = vi.fn();
+    const route = withTenant(handler, {
+      // Should never happen (DB CHECK + hook prevent it), but the role check must
+      // refuse it explicitly rather than letting a tenant_id smuggle it through.
+      createClient: async () =>
+        mockSupabase({
+          claims: { sub: USER_B, role: "authenticated", tenant_id: TENANT_B, user_role: "platform_admin" },
+          tenantRow: { is_active: true },
+        }),
+    });
+
+    const res = await route(fakeRequest);
+
+    expect(res.status).toBe(403);
+    await expect(res.json()).resolves.toMatchObject({ error: "forbidden" });
+    expect(handler).not.toHaveBeenCalled();
+  });
+
   it("returns 403 when the tenant is inactive", async () => {
     const handler = vi.fn();
     const route = withTenant(handler, {
