@@ -123,13 +123,15 @@ jobs:
             echo "Vitest not installed yet — skipping until #6 lands."
           fi
 
-      - name: Tenant isolation test (required before M1 completes)
+      - name: Tenant isolation test (required gate — closes #59)
         run: |
-          if [ -f tests/integration/tenant-isolation.test.ts ]; then
-            pnpm vitest run tests/integration/tenant-isolation.test.ts --reporter=verbose
-          else
-            echo "::warning::tenant-isolation.test.ts not present yet — M1 exit criterion (see #4)."
+          if [ ! -f tests/integration/tenant-isolation.test.ts ]; then
+            echo "::error::tests/integration/tenant-isolation.test.ts is missing."
+            echo "This file is a protected CI gate. Do not delete or rename it."
+            echo "See CONTRIBUTING.md and #59 for context."
+            exit 1
           fi
+          pnpm vitest run tests/integration/tenant-isolation.test.ts --reporter=verbose
 
   env-check:
     name: NEXT_PUBLIC_ Secret Leak Check

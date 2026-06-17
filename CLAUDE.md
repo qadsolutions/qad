@@ -260,6 +260,12 @@ tables) must pass before M2 begins. The documents/chunks-level isolation test is
 
 Set up Vitest at M1, not M8. The cross-tenant isolation test runs on every PR from M1 onwards.
 
+### Protected CI Gate — do not remove
+
+`tests/integration/tenant-isolation.test.ts` is a **required, protected file**.
+CI will exit non-zero if this file is absent (hardened in #59).
+Do not delete, rename, skip, or disable it. To extend coverage, add new test files alongside it.
+
 Coverage requirements:
 - Every API route: auth, tenant validation, correct error codes
 - Tenant isolation: Tenant A cannot retrieve Tenant B chunks under any condition
