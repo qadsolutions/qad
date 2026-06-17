@@ -7,13 +7,13 @@ must follow these procedures. No exceptions.
 
 ## Branch Strategy
 
-> **Current phase (pre-launch, M1–M8): single-tier flow.**
+> **Current phase (pre-launch, M1–M9): single-tier flow.**
 > No `dev` branch yet. Feature branches are cut from `main` and PR'd straight back
 > into `main`. Branch protection on `main` (required CI + PR review) is the only gate
 > needed while there are no live deployments and no clients.
 >
-> **`dev` is introduced at M9**, when the production Vercel deploy goes live and `main`
-> must stay equal to "what the client sees." See [§ Introducing `dev` at M9](#introducing-dev-at-m9).
+> **`dev` is introduced at M10**, when the production Vercel deploy goes live and `main`
+> must stay equal to "what the client sees." See [§ Introducing `dev` at M10](#introducing-dev-at-m10).
 
 ### Current flow (now)
 
@@ -121,13 +121,13 @@ feat(auth): implement Supabase JWT middleware with tenant_id extraction
 
 ### PR target
 
-- **Now:** Feature branches → `main`. (Hotfixes are just feature branches until M9.)
-- **From M9:** Feature → `dev` → `main`. See [§ Introducing `dev` at M9](#introducing-dev-at-m9).
+- **Now:** Feature branches → `main`. (Hotfixes are just feature branches until M10.)
+- **From M10:** Feature → `dev` → `main`. See [§ Introducing `dev` at M10](#introducing-dev-at-m10).
 
 ### Merge strategy
 
 - Feature → main: **Squash merge** (one clean commit per Issue)
-- From M9, dev → main: **Merge commit** (preserves milestone history for the production timeline)
+- From M10, dev → main: **Merge commit** (preserves milestone history for the production timeline)
 
 ### Review
 
@@ -152,7 +152,7 @@ feat(auth): implement Supabase JWT middleware with tenant_id extraction
 
 ## GitHub Milestones and Issues
 
-Each build milestone (M1-M10) is a GitHub Milestone. All work is tracked as Issues.
+Each build milestone (M1-M11) is a GitHub Milestone. All work is tracked as Issues.
 
 ### Issue labels
 
@@ -178,9 +178,9 @@ Each build milestone (M1-M10) is a GitHub Milestone. All work is tracked as Issu
 
 ---
 
-## Introducing `dev` at M9
+## Introducing `dev` at M10
 
-Once M9 (production deploy) lands, `main` becomes the live production line that
+Once M10 (production deploy) lands, `main` becomes the live production line that
 auto-deploys to Vercel. At that point, add the `dev` integration tier:
 
 1. `git checkout main && git pull`

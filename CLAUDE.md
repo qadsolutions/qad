@@ -31,7 +31,7 @@ See `Final Report QAD Solutions.docx.pdf` for the complete architecture specific
 | Inference (production) | Ollama + vLLM on private GPU server | Not provisioned yet |
 | Deployment | Vercel Pro (auto-deploys on push to main) | Not configured yet |
 | Demo tunnel | Cloudflare Tunnel pointing to local Ollama | Not configured yet |
-| Workflow automations | n8n — deferred, out of scope for M1-M7 | Running — localhost:5678 |
+| Workflow automations | n8n — deferred, out of scope through M10 | Running — localhost:5678 |
 | Containerization | Docker (local dev infra: Ollama + n8n) | Running |
 | AI SDK | Vercel AI SDK (OpenAI-compatible, handles streaming) | Not installed yet |
 | Testing | Vitest + Playwright + Supertest | Not set up yet |
@@ -190,7 +190,7 @@ VACUUM maintenance or upfront `lists` parameter tuning. IVFFlat degrades over ti
 | `messages` | id, conversation_id (FK), tenant_id (FK), role, content, created_at |
 | `retrieval_logs` | id, message_id (FK), tenant_id (FK), chunk_ids (array), similarity_scores |
 | `model_calls` | id, tenant_id (FK), user_id (FK), model_name, prompt_tokens, completion_tokens, latency_ms |
-| `audit_logs` | id, tenant_id (FK), user_id (FK), action, resource_type, ip_address, created_at |
+| `audit_logs` | id, tenant_id (FK, **nullable** — NULL = fleet-wide platform action; see SECURITY.md §5), user_id (FK, NOT NULL — actor), action, resource_type, ip_address, created_at |
 | `settings` | id, tenant_id (FK), key, value, updated_by |
 
 ### Roles & admin model
@@ -204,17 +204,23 @@ Three roles (`users.role`), each with its own surface:
 | `platform_admin` | Us, the operator | Platform console (M11) | All tenants, via `service_role` (never RLS) |
 
 **Flat tenant admins:** a single `admin` role, no separate owner. Guard: the last active admin of a
-tenant cannot be deactivated or demoted (lockout prevention).
+tenant cannot be deactivated or demoted (lockout prevention). Enforced **server-side** — a DB trigger
+or the user-management API route, never UI-only, so direct API calls cannot bypass it (enforced in M7).
 
-**`platform_admin` has no tenant:** `users.tenant_id` is nullable *only* for this role
-(`CHECK (role = 'platform_admin' OR tenant_id IS NOT NULL)`). With no `tenant_id` claim they match no
-RLS policy (zero client rows through the normal client) and `withTenant` 403s them — platform routes
-use a separate `withPlatformAdmin` guard + `service_role` (SECURITY.md §3.4).
+**`platform_admin` has no tenant:** `users.tenant_id` is nullable *only* for this role, locked by two
+complementary CHECKs so that `tenant_id IS NULL` ⟺ `role = 'platform_admin'`:
+`CHECK (role = 'platform_admin' OR tenant_id IS NOT NULL)` (clients must have a tenant) **and**
+`CHECK (role <> 'platform_admin' OR tenant_id IS NULL)` (platform admins must not — closes the
+confused-deputy path). With no `tenant_id` claim they match no RLS policy (zero client rows through the
+normal client). The API-layer guard `withTenant` rejects them **explicitly** — it 403s any token with
+no `tenant_id` **or** role `platform_admin`. Platform routes use a separate `withPlatformAdmin` guard +
+`service_role`. Both guards are defined in **SECURITY.md §3.4**.
 
-### n8n (deferred — do not integrate before M7 is complete)
+### n8n (deferred — do not integrate before M10 / first client)
 
 n8n is reserved for post-answer automations (scheduling handoffs, CRM updates, lead capture).
-No role in M1-M7. Do not integrate until customer discovery validates a specific automation use case.
+No role through M10. Do not integrate until a real client has shipped (M10) and customer discovery
+validates a specific automation use case.
 
 ---
 

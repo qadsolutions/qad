@@ -85,7 +85,7 @@ docker compose up -d
 | Service | URL |
 |---|---|
 | Ollama | http://localhost:11434 |
-| n8n (deferred — M7+) | http://localhost:5678 |
+| n8n (deferred — post-M10) | http://localhost:5678 |
 
 ### Pull models (first run)
 

@@ -67,6 +67,8 @@ grep INFERENCE_PROVIDER .env.local
 
 ## 3. Tenant Isolation Rules
 
+### 3.1 Per-request isolation requirements
+
 Every API route that touches the database must:
 
 1. Extract `tenant_id` from the authenticated JWT — never from query params or request body
@@ -74,7 +76,7 @@ Every API route that touches the database must:
 3. Use the anon key Supabase client (subject to RLS) for all tenant-scoped queries
 4. Use service_role key only for platform admin operations
 
-### Mandatory isolation test
+### 3.2 Mandatory isolation test (M1)
 
 File: `tests/integration/tenant-isolation.test.ts`
 
@@ -88,9 +90,37 @@ tenant-scoped tables, so the **M1** test proves it on the tables that exist in M
 
 This test is a **M1 exit criterion**. See CLAUDE.md.
 
+### 3.3 Extending isolation coverage (M2+)
+
 In **M2**, once `documents` / `document_chunks` / `embeddings` exist, extend coverage to the
 RAG retrieval path: assert Tenant A returns zero Tenant B **chunks** (tracked as a separate
 M2 issue).
+
+### 3.4 Platform-admin access path
+
+`platform_admin` is the operator role (us). It belongs to **no tenant** and must never reach
+client data through RLS. Two API-layer guards enforce the separation:
+
+- **`withTenant`** — the default guard for tenant-scoped routes (`app/api/**`). It extracts
+  `tenant_id` from the JWT and **403s any request that has no `tenant_id` claim _or_ whose role
+  is `platform_admin`**. A platform-admin token must never pass `withTenant`, even if a
+  `tenant_id` were somehow present — the role check is explicit, not merely a side effect of the
+  missing claim.
+- **`withPlatformAdmin`** — the guard for platform routes (`app/api/platform/**`, M11). It asserts
+  `role === 'platform_admin'`, then uses the **`service_role`** client (RLS-bypassing) for
+  deliberate cross-tenant reads/writes.
+
+Schema enforcement (issue #69, M2). `users.tenant_id` is nullable **only** for platform admins,
+locked by two complementary CHECKs:
+
+```sql
+CHECK (role = 'platform_admin' OR tenant_id IS NOT NULL)   -- clients must have a tenant
+CHECK (role <> 'platform_admin' OR tenant_id IS NULL)      -- platform admins must not
+```
+
+Together these make `tenant_id IS NULL` ⟺ `role = 'platform_admin'`, closing the confused-deputy
+path where a `platform_admin` row carries a `tenant_id` and is mistakenly treated as a client of
+that tenant.
 
 ---
 
@@ -112,6 +142,15 @@ with: `user_id`, `tenant_id`, `action`, `resource_type`, `resource_id`, `ip_addr
 
 Audit logs are immutable — no UPDATE or DELETE on the `audit_logs` table for any role
 except platform admin (delete only for data retention compliance, not edits).
+
+**`tenant_id` is nullable** (Option A, decided 2026-06-17). It records the tenant an action
+*affected*; a fleet-wide `platform_admin` action (no single tenant) stores `NULL`. `user_id` is
+always set, so actor attribution is never lost. The tenant-admin audit view filters
+`tenant_id = auth.jwt()->>'tenant_id'`, so NULL rows are invisible to clients (SQL three-valued
+logic excludes them) and surface only via the `service_role` platform console (§3.4). The
+invariant "NULL `tenant_id` ⇒ actor is `platform_admin`" is enforced in the audit-logger **write
+path** (a cross-table CHECK isn't practical). Rationale: keeps the isolation surface free of
+sentinel special-cases and reuses the `users.tenant_id` nullability convention (issue #69).
 
 Minimum retention: 90 days.
 
