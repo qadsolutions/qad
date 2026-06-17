@@ -79,12 +79,18 @@ Every API route that touches the database must:
 File: `tests/integration/tenant-isolation.test.ts`
 
 Must pass on every PR touching any API route, DB query, middleware, or RLS migration.
-Must:
-- Create Tenant A and Tenant B with separate users and documents
-- Confirm Tenant A JWT returns zero Tenant B chunks
-- Confirm Tenant B JWT returns zero Tenant A chunks
+
+The isolation mechanism (`JWT tenant_id` claim → RLS filter) is identical across all
+tenant-scoped tables, so the **M1** test proves it on the tables that exist in M1:
+- Create Tenant A and Tenant B, each with its own user(s)
+- Confirm Tenant A JWT returns zero Tenant B rows (querying `users`/`tenants` under RLS)
+- Confirm Tenant B JWT returns zero Tenant A rows
 
 This test is a **M1 exit criterion**. See CLAUDE.md.
+
+In **M2**, once `documents` / `document_chunks` / `embeddings` exist, extend coverage to the
+RAG retrieval path: assert Tenant A returns zero Tenant B **chunks** (tracked as a separate
+M2 issue).
 
 ---
 
