@@ -76,6 +76,11 @@ Every API route that touches the database must:
 3. Use the anon key Supabase client (subject to RLS) for all tenant-scoped queries
 4. Use service_role key only for platform admin operations
 
+**Carve-out:** rules 1–2 apply to tenant-scoped routes guarded by `withTenant`. Routes guarded by
+`withPlatformAdmin` (§3.4) are **exempt from the `tenant_id` non-null assertion** — the
+`platform_admin` actor has no tenant by design. They authorize on the `platform_admin` role claim
+instead and must never fall through to the `withTenant` path.
+
 ### 3.2 Mandatory isolation test (M1)
 
 File: `tests/integration/tenant-isolation.test.ts`
@@ -122,6 +127,33 @@ Together these make `tenant_id IS NULL` ⟺ `role = 'platform_admin'`, closing t
 path where a `platform_admin` row carries a `tenant_id` and is mistakenly treated as a client of
 that tenant.
 
+**Role assignment is privileged.** The CHECKs above govern `tenant_id` nullability — they do **not**
+restrict who can write `role = 'platform_admin'`. Therefore:
+
+- **No API route using the anon-key client may accept or set `role = 'platform_admin'`.** User-facing
+  creation/invite/update endpoints must reject that value (allow-list `user` / `admin` only).
+- `platform_admin` rows may be created **only** via direct database access (the bootstrap path) or a
+  `withPlatformAdmin`-guarded route — never through any signup, invite, or self-service flow.
+- **Required integration test:** the anon-key client cannot create or escalate a row to
+  `role = 'platform_admin'` (assert the write is rejected).
+
+**Bootstrap.** The *first* `platform_admin` is a chicken-and-egg case (no platform admin exists yet to
+authorize a guarded route), so it is seeded by **direct database access only** (migration/seed or
+Supabase SQL console), and the procedure is documented in the runbook. Subsequent platform admins may
+be created via a `withPlatformAdmin`-guarded route. No signup/invite flow may ever produce this role.
+
+**Bounded write surface.** `withPlatformAdmin` routes use `service_role` (RLS-bypassing), so their
+write scope must be **explicitly enumerated** — each permitted operation (e.g. tenant provisioning,
+`plan_tier` change, deactivation) is its own purpose-built route with a typed payload. There is **no
+generic cross-tenant write surface** via `service_role`; a compromised platform session must not be
+able to overwrite arbitrary rows across all tenants.
+
+**Blast radius / revocation.** A compromised `platform_admin` session is higher-impact than any tenant
+session (cross-tenant reach via `service_role`). Incident response: immediately revoke the session and
+rotate credentials (Supabase Auth admin sign-out / refresh-token revocation for that user, plus
+`service_role` key rotation if key exposure is suspected — §1), then audit `audit_logs` for that
+`user_id`. Document this as a standalone incident-response note in the M11 runbook.
+
 ---
 
 ## 4. Secret Management
@@ -147,12 +179,19 @@ except platform admin (delete only for data retention compliance, not edits).
 *affected*; a fleet-wide `platform_admin` action (no single tenant) stores `NULL`. `user_id` is
 always set, so actor attribution is never lost. The tenant-admin audit view filters
 `tenant_id = auth.jwt()->>'tenant_id'`, so NULL rows are invisible to clients (SQL three-valued
-logic excludes them) and surface only via the `service_role` platform console (§3.4). The
-invariant "NULL `tenant_id` ⇒ actor is `platform_admin`" is enforced in the audit-logger **write
-path** (a cross-table CHECK isn't practical). Rationale: keeps the isolation surface free of
-sentinel special-cases and reuses the `users.tenant_id` nullability convention (issue #69).
+logic excludes them) and surface only via the `service_role` platform console (§3.4). Rationale:
+keeps the isolation surface free of sentinel special-cases and reuses the `users.tenant_id`
+nullability convention (issue #69).
 
-Minimum retention: 90 days.
+The invariant **"NULL `tenant_id` ⇒ actor is `platform_admin`"** is enforced in the audit-logger
+**write path**. Because that is a single code path with no DB-level backstop, it carries a
+**required integration test**: *the audit-logger must reject any write where `tenant_id IS NULL` and
+the actor is not `platform_admin`.* Any future writer (background job, new route) is covered by the
+same logger; writing to `audit_logs` directly, bypassing it, is disallowed.
+
+Minimum retention: 90 days. **Deletes are retention-scoped only:** the sole permitted `DELETE` on
+`audit_logs` is the automated retention job removing rows older than the retention window — even
+`platform_admin` may not delete arbitrary or in-window rows. There is no ad-hoc delete path.
 
 ---
 

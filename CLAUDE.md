@@ -190,7 +190,7 @@ VACUUM maintenance or upfront `lists` parameter tuning. IVFFlat degrades over ti
 | `messages` | id, conversation_id (FK), tenant_id (FK), role, content, created_at |
 | `retrieval_logs` | id, message_id (FK), tenant_id (FK), chunk_ids (array), similarity_scores |
 | `model_calls` | id, tenant_id (FK), user_id (FK), model_name, prompt_tokens, completion_tokens, latency_ms |
-| `audit_logs` | id, tenant_id (FK, **nullable** — NULL = fleet-wide platform action; see SECURITY.md §5), user_id (FK, NOT NULL — actor), action, resource_type, ip_address, created_at |
+| `audit_logs` | id, tenant_id (FK, **nullable** — NULL = fleet-wide platform action; see SECURITY.md §5), user_id (FK, NOT NULL — actor), action, resource_type, resource_id, ip_address, created_at |
 | `settings` | id, tenant_id (FK), key, value, updated_by |
 
 ### Roles & admin model
@@ -204,8 +204,11 @@ Three roles (`users.role`), each with its own surface:
 | `platform_admin` | Us, the operator | Platform console (M11) | All tenants, via `service_role` (never RLS) |
 
 **Flat tenant admins:** a single `admin` role, no separate owner. Guard: the last active admin of a
-tenant cannot be deactivated or demoted (lockout prevention). Enforced **server-side** — a DB trigger
-or the user-management API route, never UI-only, so direct API calls cannot bypass it (enforced in M7).
+tenant cannot be deactivated or demoted (lockout prevention). Enforced by a **DB trigger** — the only
+layer that also fires for `service_role` writes — not UI- or API-route-only, since a `withPlatformAdmin`
+route writing `users.role`/`users.is_active` via `service_role` would otherwise bypass an app-layer
+check. (Deliberate full-tenant teardown during deprovisioning is a separate, explicit platform path.)
+Enforced in M7.
 
 **`platform_admin` has no tenant:** `users.tenant_id` is nullable *only* for this role, locked by two
 complementary CHECKs so that `tenant_id IS NULL` ⟺ `role = 'platform_admin'`:
