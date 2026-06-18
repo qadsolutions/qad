@@ -17,11 +17,25 @@ const MIGRATIONS_DIR = resolve(process.cwd(), "supabase/migrations");
 // service_role role below.
 const MIGRATION_DENYLIST = new Set<string>();
 
+/** Migration filenames must be timestamp-prefixed so filename sort = apply order. */
+const MIGRATION_FILENAME = /^\d{14}_.+\.sql$/;
+
 /** All on-disk migrations in chronological order, minus the denylist. */
 function migrationsToApply(): string[] {
-  return readdirSync(MIGRATIONS_DIR)
-    .filter((f) => f.endsWith(".sql") && !MIGRATION_DENYLIST.has(f))
-    .sort();
+  const files = readdirSync(MIGRATIONS_DIR).filter(
+    (f) => f.endsWith(".sql") && !MIGRATION_DENYLIST.has(f),
+  );
+  // Apply order is filename order, which only equals chronological order while
+  // every name is <14-digit timestamp>_<slug>.sql. A stray name (e.g. V2__x.sql)
+  // would sort into the wrong place and silently apply out of order — fail loudly.
+  const malformed = files.filter((f) => !MIGRATION_FILENAME.test(f));
+  if (malformed.length > 0) {
+    throw new Error(
+      "Migration filenames must match <14-digit timestamp>_<name>.sql so filename " +
+        `sort equals apply order. Offenders: ${malformed.join(", ")}`,
+    );
+  }
+  return files.sort();
 }
 
 /**
@@ -72,8 +86,8 @@ export async function bootstrapTestDatabase(sql: Sql): Promise<void> {
   `);
 
   // 4. auth.jwt() — reads request.jwt.claims GUC that PostgREST sets per-request.
-  //    Identical to Supabase's built-in. STABLE so PostgreSQL can cache within
-  //    a query but must re-evaluate per row (correct for RLS).
+  //    Identical to Supabase's built-in. STABLE: may be cached across rows within
+  //    a single statement — safe here because the JWT does not change mid-query.
   await sql.unsafe(`
     CREATE OR REPLACE FUNCTION auth.jwt() RETURNS jsonb
     LANGUAGE sql STABLE AS $$
@@ -115,12 +129,16 @@ export async function bootstrapTestDatabase(sql: Sql): Promise<void> {
       created_at timestamptz NOT NULL DEFAULT now()
     );
 
-    -- Mirrors Supabase's helper: split the object name on '/'. The real function
-    -- drops the trailing filename, but every policy keys off element [1] (the
-    -- tenant folder), which is identical either way.
+    -- Faithful mirror of Supabase's helper: split on '/' and DROP the trailing
+    -- filename segment. So foldername('a/b/file.pdf') => {a,b}, foldername('a/x') =>
+    -- {a}, and a single-segment name with no '/' => {} (whose [1] is NULL, so the
+    -- policy fails closed) — exactly like production. Keeping the filename (an
+    -- earlier shortcut) made a slash-less object visible here but hidden in prod.
+    -- IMMUTABLE is correct (string_to_array on a literal delimiter is pure); real
+    -- Supabase marks it STABLE, but the result is identical.
     CREATE OR REPLACE FUNCTION storage.foldername(name text)
     RETURNS text[] LANGUAGE sql IMMUTABLE AS $$
-      SELECT string_to_array(name, '/')
+      SELECT (string_to_array(name, '/'))[1 : array_length(string_to_array(name, '/'), 1) - 1]
     $$;
 
     GRANT USAGE ON SCHEMA storage TO authenticated, service_role;

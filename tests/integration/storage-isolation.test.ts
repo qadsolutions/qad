@@ -6,13 +6,14 @@ import { bootstrapTestDatabase, seedTestData } from "../helpers/setup-test-db";
 /**
  * Cross-tenant isolation for the `documents` Storage bucket (#61).
  *
- * Same shape as the table-level isolation test, one layer down: it proves the
- * RLS policy on `storage.objects` confines an authenticated caller to objects
- * whose first path segment is their own tenant_id. The bucket layout is
+ * The storage-layer analogue of the table RLS test: it proves the policy on
+ * `storage.objects` confines an authenticated caller to objects whose first path
+ * segment is their own tenant_id. The bucket layout is
  * `<tenant_id>/<document_id>/<filename>`, so the tenant folder is segment [1].
  *
- * The harness fakes a minimal `storage` schema (see setup-test-db.ts); the policy
- * under test is the real one from the migration.
+ * The harness fakes a minimal `storage` schema (see setup-test-db.ts), including a
+ * faithful `storage.foldername` that drops the trailing filename like production;
+ * the policy under test is the real one from the migration.
  */
 
 const TENANT_A_ID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
@@ -71,6 +72,22 @@ const tenantClaims = (tenantId: string, userId: string) => ({
 });
 
 describe("cross-tenant storage isolation (documents bucket)", () => {
+  it("positive control: both seeded objects exist and the bucket is private", async () => {
+    // Runs as the superuser (no asClaims), exempt from RLS — proves the seed and
+    // the bucket migration actually landed, so the isolation assertions below are
+    // filtering real data rather than passing vacuously on an empty table.
+    const objs = await sql<{ name: string }[]>`
+      SELECT name FROM storage.objects WHERE bucket_id = 'documents'
+    `;
+    expect(objs.map((o) => o.name)).toEqual(expect.arrayContaining([OBJECT_A, OBJECT_B]));
+
+    const bucket = await sql<{ public: boolean }[]>`
+      SELECT public FROM storage.buckets WHERE id = 'documents'
+    `;
+    // A public bucket would bypass RLS via the CDN URL — must stay private.
+    expect(bucket[0].public).toBe(false);
+  });
+
   it("Tenant A sees only its own object", async () => {
     const rows = await asClaims(tenantClaims(TENANT_A_ID, USER_A_ID), (tx) =>
       tx<{ name: string }[]>`SELECT name FROM storage.objects WHERE bucket_id = 'documents'`,
@@ -97,8 +114,8 @@ describe("cross-tenant storage isolation (documents bucket)", () => {
       `,
     );
 
-    // The RLS USING clause is applied before WHERE, so the cross-tenant name
-    // filter still returns nothing.
+    // The RLS USING condition is merged into the query as an AND predicate, so no
+    // matter what the WHERE clause requests, rows failing it are never returned.
     expect(rows).toHaveLength(0);
   });
 
@@ -110,5 +127,57 @@ describe("cross-tenant storage isolation (documents bucket)", () => {
     );
 
     expect(rows).toHaveLength(0);
+  });
+
+  it("authenticated cannot INSERT into storage.objects (writes are service_role-only)", async () => {
+    // The write gate is the grant layer (authenticated has SELECT only), not a
+    // policy. This locks that in: a stray future write grant would break this test.
+    await expect(
+      asClaims(tenantClaims(TENANT_A_ID, USER_A_ID), (tx) =>
+        tx`
+          INSERT INTO storage.objects (bucket_id, name, owner)
+          VALUES ('documents', ${`${TENANT_A_ID}/evil/x.pdf`}, ${USER_A_ID})
+        `,
+      ),
+    ).rejects.toThrow(/permission denied/);
+  });
+
+  it("an object with no tenant folder (single-segment name) is hidden from everyone", async () => {
+    // foldername('loose.pdf') => {} (no folders), so [1] is NULL and the predicate
+    // is never true. Proves a misnamed object fails closed rather than leaking.
+    const LOOSE = "loose.pdf";
+    await sql`
+      INSERT INTO storage.objects (bucket_id, name, owner)
+      VALUES ('documents', ${LOOSE}, ${USER_A_ID})
+    `;
+
+    const rows = await asClaims(tenantClaims(TENANT_A_ID, USER_A_ID), (tx) =>
+      tx<{ name: string }[]>`
+        SELECT name FROM storage.objects WHERE bucket_id = 'documents' AND name = ${LOOSE}
+      `,
+    );
+
+    expect(rows).toHaveLength(0);
+  });
+
+  it("an object in a different bucket is not visible through the documents policy", async () => {
+    // Same tenant folder, different bucket. The `bucket_id = 'documents'` clause in
+    // the policy must exclude it — proves that guard is load-bearing before M3 adds
+    // more buckets.
+    await sql`
+      INSERT INTO storage.buckets (id, name, public)
+      VALUES ('other', 'other', false) ON CONFLICT (id) DO NOTHING
+    `;
+    await sql`
+      INSERT INTO storage.objects (bucket_id, name, owner)
+      VALUES ('other', ${`${TENANT_A_ID}/doc/x.pdf`}, ${USER_A_ID})
+    `;
+
+    const rows = await asClaims(tenantClaims(TENANT_A_ID, USER_A_ID), (tx) =>
+      tx<{ bucket_id: string }[]>`SELECT bucket_id FROM storage.objects`,
+    );
+
+    expect(rows.length).toBeGreaterThan(0);
+    expect(rows.every((r) => r.bucket_id === "documents")).toBe(true);
   });
 });
