@@ -23,6 +23,17 @@ export type AppRole = "admin" | "user" | "platform_admin";
  * that drives RLS. Overwriting it would break row-level security.
  */
 export interface AppJwtClaims {
+  /**
+   * Tenant the caller belongs to. Optional `string` — NOT `string | null` —
+   * deliberately: the access-token hook *omits* this claim entirely for a
+   * tenant-less `platform_admin` (it never emits `null`). So at the JWT layer the
+   * only states are "present string" or "absent (undefined)".
+   *
+   * This diverges on purpose from the DB column `users.tenant_id uuid | null`
+   * (#69). When #22 generates DB types, do NOT "align" this claim type to
+   * `string | null` — a `null` here would be a malformed token, and the absence
+   * is what `extractTenantContext` keys on.
+   */
   tenant_id?: string;
   user_role?: AppRole;
 }
@@ -87,6 +98,10 @@ export function extractTenantContext(payload: SupabaseJwtPayload): TenantContext
   return {
     userId: payload.sub,
     tenantId,
+    // Unknown / missing role falls back to "user" by design: it is the LEAST
+    // privileged role (Client Portal, query-only), so an unrecognised claim
+    // fails safe rather than escalating. Do not change this to throw or to
+    // default to a higher role without revisiting the threat model.
     role: isAppRole(payload.user_role) ? payload.user_role : "user",
   };
 }

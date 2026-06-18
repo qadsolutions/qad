@@ -57,21 +57,25 @@ describe("users tenant_id CHECK constraints (#69)", () => {
   // ---- Rows that MUST be accepted -----------------------------------------
 
   it("accepts an admin WITH a tenant_id", async () => {
-    await expect(
-      sql`
-        INSERT INTO public.users (id, tenant_id, email, role)
-        VALUES (${AU.adminValid}, ${TENANT_ID}, 'admin-valid@check.test', 'admin')
-      `,
-    ).resolves.toBeDefined();
+    // RETURNING + length assertion confirms the row was actually written, rather
+    // than only that the promise resolved (which a no-op could also do).
+    const rows = await sql<{ id: string }[]>`
+      INSERT INTO public.users (id, tenant_id, email, role)
+      VALUES (${AU.adminValid}, ${TENANT_ID}, 'admin-valid@check.test', 'admin')
+      RETURNING id
+    `;
+    expect(rows).toHaveLength(1);
+    expect(rows[0].id).toBe(AU.adminValid);
   });
 
   it("accepts a platform_admin with NULL tenant_id", async () => {
-    await expect(
-      sql`
-        INSERT INTO public.users (id, tenant_id, email, role)
-        VALUES (${AU.paNull}, ${null}, 'pa-null@check.test', 'platform_admin')
-      `,
-    ).resolves.toBeDefined();
+    const rows = await sql<{ id: string }[]>`
+      INSERT INTO public.users (id, tenant_id, email, role)
+      VALUES (${AU.paNull}, ${null}, 'pa-null@check.test', 'platform_admin')
+      RETURNING id
+    `;
+    expect(rows).toHaveLength(1);
+    expect(rows[0].id).toBe(AU.paNull);
   });
 
   // ---- Rows that MUST be rejected ------------------------------------------
@@ -82,7 +86,7 @@ describe("users tenant_id CHECK constraints (#69)", () => {
         INSERT INTO public.users (id, tenant_id, email, role)
         VALUES (${AU.adminNull}, ${null}, 'admin-null@check.test', 'admin')
       `,
-    ).rejects.toThrow("users_client_requires_tenant");
+    ).rejects.toThrow(/violates check constraint "users_client_requires_tenant"/);
   });
 
   it("rejects a user with NULL tenant_id (users_client_requires_tenant)", async () => {
@@ -91,7 +95,7 @@ describe("users tenant_id CHECK constraints (#69)", () => {
         INSERT INTO public.users (id, tenant_id, email, role)
         VALUES (${AU.userNull}, ${null}, 'user-null@check.test', 'user')
       `,
-    ).rejects.toThrow("users_client_requires_tenant");
+    ).rejects.toThrow(/violates check constraint "users_client_requires_tenant"/);
   });
 
   it("rejects a platform_admin that carries a tenant_id — confused-deputy (users_platform_admin_has_no_tenant)", async () => {
@@ -100,6 +104,6 @@ describe("users tenant_id CHECK constraints (#69)", () => {
         INSERT INTO public.users (id, tenant_id, email, role)
         VALUES (${AU.paWithTenant}, ${TENANT_ID}, 'pa-tenant@check.test', 'platform_admin')
       `,
-    ).rejects.toThrow("users_platform_admin_has_no_tenant");
+    ).rejects.toThrow(/violates check constraint "users_platform_admin_has_no_tenant"/);
   });
 });
