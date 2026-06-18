@@ -104,10 +104,11 @@ describe("withTenant", () => {
     const route = withTenant(handler, {
       // Should never happen (DB CHECK + hook prevent it), but the role check must
       // refuse it explicitly rather than letting a tenant_id smuggle it through.
+      // No tenantRow is mocked on purpose: Step 2 rejects on the role claim before
+      // the tenant-status DB query is ever reached.
       createClient: async () =>
         mockSupabase({
           claims: { sub: USER_B, role: "authenticated", tenant_id: TENANT_B, user_role: "platform_admin" },
-          tenantRow: { is_active: true },
         }),
     });
 
@@ -142,6 +143,27 @@ describe("withTenant", () => {
 
     expect(res.status).toBe(403);
     expect(handler).not.toHaveBeenCalled();
+  });
+
+  it("passes a plain user role through (Step 2 only rejects platform_admin)", async () => {
+    // Regression guard for #69: inserting the platform_admin reject at Step 2 must
+    // not affect ordinary 'user'/'admin' tokens — they still reach the handler.
+    const handler = vi.fn(async (_req, { tenant }) =>
+      Response.json({ tenantId: tenant.tenantId, role: tenant.role }),
+    );
+    const route = withTenant(handler, {
+      createClient: async () =>
+        mockSupabase({
+          claims: { sub: USER_B, role: "authenticated", tenant_id: TENANT_B, user_role: "user" },
+          tenantRow: { is_active: true },
+        }),
+    });
+
+    const res = await route(fakeRequest);
+
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toEqual({ tenantId: TENANT_B, role: "user" });
+    expect(handler).toHaveBeenCalledOnce();
   });
 
   it("passes the validated tenant context to the handler on success", async () => {

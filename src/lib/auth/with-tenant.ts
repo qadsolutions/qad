@@ -80,7 +80,7 @@ export async function validateTenant(supabase: SupabaseClient): Promise<TenantCo
   // directly — not merely as a side effect of the missing tenant_id below — so a
   // platform_admin token that somehow carries a tenant_id (confused-deputy) is still
   // refused. Platform routes use the separate withPlatformAdmin guard + service_role.
-  if ((data.claims as { user_role?: string }).user_role === "platform_admin") {
+  if ((data.claims as unknown as SupabaseJwtPayload).user_role === "platform_admin") {
     throw new TenantValidationError(
       403,
       "forbidden",
