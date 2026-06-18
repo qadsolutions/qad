@@ -93,6 +93,42 @@ export async function bootstrapTestDatabase(sql: Sql): Promise<void> {
     GRANT EXECUTE ON FUNCTION auth.jwt()     TO authenticated;
   `);
 
+  // 5b. Minimal mirror of Supabase Storage. Real Supabase manages the `storage`
+  //     schema; we fake the subset our policies use (buckets, objects,
+  //     foldername()) so the storage migration (#61) applies and its RLS can be
+  //     tested the same way the auth schema above lets us test table RLS.
+  await sql.unsafe(`
+    DROP SCHEMA IF EXISTS storage CASCADE;
+    CREATE SCHEMA storage;
+
+    CREATE TABLE storage.buckets (
+      id     text PRIMARY KEY,
+      name   text NOT NULL,
+      public boolean NOT NULL DEFAULT false
+    );
+
+    CREATE TABLE storage.objects (
+      id         uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      bucket_id  text REFERENCES storage.buckets (id),
+      name       text NOT NULL,
+      owner      uuid,
+      created_at timestamptz NOT NULL DEFAULT now()
+    );
+
+    -- Mirrors Supabase's helper: split the object name on '/'. The real function
+    -- drops the trailing filename, but every policy keys off element [1] (the
+    -- tenant folder), which is identical either way.
+    CREATE OR REPLACE FUNCTION storage.foldername(name text)
+    RETURNS text[] LANGUAGE sql IMMUTABLE AS $$
+      SELECT string_to_array(name, '/')
+    $$;
+
+    GRANT USAGE ON SCHEMA storage TO authenticated, service_role;
+    GRANT SELECT ON storage.objects, storage.buckets TO authenticated;
+    GRANT SELECT, INSERT, UPDATE, DELETE ON storage.objects TO service_role;
+    GRANT SELECT, INSERT, UPDATE, DELETE ON storage.buckets TO service_role;
+  `);
+
   // 6. Apply every migration on disk in filename (chronological) order.
   //    sql.unsafe() is required for DDL — the postgres package disables
   //    parameterization for raw strings, which is correct for migration files.
