@@ -5,8 +5,9 @@
  * a single chokepoint so individual routes cannot forget to:
  *
  *   1. Verify the JWT                       → 401 if missing/invalid
- *   2. Require a non-null `tenant_id` claim → 403 if absent
- *   3. Confirm the tenant is active         → 403 if inactive/not found
+ *   2. Reject `platform_admin` tokens       → 403 (no tenant; use withPlatformAdmin)
+ *   3. Require a non-null `tenant_id` claim → 403 if absent
+ *   4. Confirm the tenant is active         → 403 if inactive/not found
  *
  * The validated {@link TenantContext} and an RLS-scoped (anon-key) Supabase
  * client are passed *into* the handler, so `tenant_id` always originates from
@@ -74,7 +75,20 @@ export async function validateTenant(supabase: SupabaseClient): Promise<TenantCo
     throw new TenantValidationError(401, "unauthorized", "Missing or invalid authentication token");
   }
 
-  // Step 2: require a non-null tenant_id. The token is valid here, so a missing
+  // Step 2: reject platform_admin explicitly. A platform_admin belongs to no tenant
+  // (SECURITY.md §3.4) and must never pass a tenant-scoped route. Check the role claim
+  // directly — not merely as a side effect of the missing tenant_id below — so a
+  // platform_admin token that somehow carries a tenant_id (confused-deputy) is still
+  // refused. Platform routes use the separate withPlatformAdmin guard + service_role.
+  if ((data.claims as unknown as SupabaseJwtPayload).user_role === "platform_admin") {
+    throw new TenantValidationError(
+      403,
+      "forbidden",
+      "platform_admin tokens are not valid on tenant-scoped routes",
+    );
+  }
+
+  // Step 3: require a non-null tenant_id. The token is valid here, so a missing
   // claim is an authorization failure (403), not an authentication one (401).
   let tenant: TenantContext;
   try {
@@ -86,7 +100,7 @@ export async function validateTenant(supabase: SupabaseClient): Promise<TenantCo
     throw err;
   }
 
-  // Step 3: confirm the tenant is active. RLS already scopes this select to the
+  // Step 4: confirm the tenant is active. RLS already scopes this select to the
   // caller's own tenant; the explicit .eq is defensive and self-documenting.
   const { data: row, error: queryError } = await supabase
     .from("tenants")

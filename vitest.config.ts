@@ -19,6 +19,14 @@ export default defineConfig({
   test: {
     environment: "node",
     globals: true,
+    // Run test FILES one at a time. The integration suites share a single Postgres
+    // database and each fully resets it (DROP SCHEMA public CASCADE + recreate roles)
+    // in beforeAll. Two such files in parallel race on global objects — concurrent
+    // CREATE ROLE throws a unique-violation, and one file's schema reset wipes the
+    // other's seeded rows mid-run. Serializing files makes each bootstrap exclusive.
+    // (Tests within a file already run sequentially by default.) Suites are small,
+    // so the wall-clock cost is negligible.
+    fileParallelism: false,
     include: ["tests/**/*.{test,spec}.ts", "src/**/*.{test,spec}.ts"],
     env: {
       DATABASE_URL:
