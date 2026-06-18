@@ -39,6 +39,24 @@ export interface AppJwtClaims {
 }
 
 /**
+ * Compile-time backstop for the deliberate `tenant_id?: string` choice above.
+ *
+ * `Expect<T extends true>` only accepts `true`. `_TenantIdExcludesNull` evaluates
+ * to `true` exactly while `null` is NOT assignable to the claim type. If anyone
+ * widens `AppJwtClaims["tenant_id"]` to include `null` (e.g. "aligning" it with the
+ * DB column `users.tenant_id uuid | null` at #22), it flips to `false`, violates the
+ * `extends true` constraint, and breaks `tsc --noEmit` in CI. A comment alone could
+ * be ignored; this cannot.
+ */
+type Expect<T extends true> = T;
+// Intentionally unreferenced: *declaring* the alias is what forces tsc to evaluate
+// the `extends true` constraint. There is nothing to "use", so silence the report.
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+type _TenantIdExcludesNull = Expect<
+  [null] extends [AppJwtClaims["tenant_id"]] ? false : true
+>;
+
+/**
  * The decoded access-token payload: the standard Supabase/JWT registered claims
  * plus our custom claims. Custom claims are optional here because a malformed or
  * pre-hook token may lack them — validation happens in `extractTenantContext`.
@@ -102,6 +120,9 @@ export function extractTenantContext(payload: SupabaseJwtPayload): TenantContext
     // privileged role (Client Portal, query-only), so an unrecognised claim
     // fails safe rather than escalating. Do not change this to throw or to
     // default to a higher role without revisiting the threat model.
+    // TODO(#75): this fallback is currently silent — emit a structured
+    // `auth.role_fallback` event here once M9 adds the logging/alerting sink, so a
+    // hook regression that downgrades privilege leaves a trace instead of vanishing.
     role: isAppRole(payload.user_role) ? payload.user_role : "user",
   };
 }

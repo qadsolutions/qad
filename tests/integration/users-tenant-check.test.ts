@@ -57,25 +57,26 @@ describe("users tenant_id CHECK constraints (#69)", () => {
   // ---- Rows that MUST be accepted -----------------------------------------
 
   it("accepts an admin WITH a tenant_id", async () => {
-    // RETURNING + length assertion confirms the row was actually written, rather
-    // than only that the promise resolved (which a no-op could also do).
-    const rows = await sql<{ id: string }[]>`
+    // RETURNING the full triple confirms the row was written AND persisted with the
+    // intended values — a row landing with the wrong tenant_id or role would fail
+    // here, not slip through on a bare id check.
+    const rows = await sql<{ id: string; tenant_id: string | null; role: string }[]>`
       INSERT INTO public.users (id, tenant_id, email, role)
       VALUES (${AU.adminValid}, ${TENANT_ID}, 'admin-valid@check.test', 'admin')
-      RETURNING id
+      RETURNING id, tenant_id, role
     `;
     expect(rows).toHaveLength(1);
-    expect(rows[0].id).toBe(AU.adminValid);
+    expect(rows[0]).toMatchObject({ id: AU.adminValid, tenant_id: TENANT_ID, role: "admin" });
   });
 
   it("accepts a platform_admin with NULL tenant_id", async () => {
-    const rows = await sql<{ id: string }[]>`
+    const rows = await sql<{ id: string; tenant_id: string | null; role: string }[]>`
       INSERT INTO public.users (id, tenant_id, email, role)
       VALUES (${AU.paNull}, ${null}, 'pa-null@check.test', 'platform_admin')
-      RETURNING id
+      RETURNING id, tenant_id, role
     `;
     expect(rows).toHaveLength(1);
-    expect(rows[0].id).toBe(AU.paNull);
+    expect(rows[0]).toMatchObject({ id: AU.paNull, tenant_id: null, role: "platform_admin" });
   });
 
   // ---- Rows that MUST be rejected ------------------------------------------
