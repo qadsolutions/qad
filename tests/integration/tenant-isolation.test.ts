@@ -87,8 +87,8 @@ describe("cross-tenant row-level security", () => {
         `,
       );
 
-      // RLS USING clause is evaluated before the WHERE filter.
-      // An explicit WHERE id = <other-tenant> still returns 0 rows.
+      // The RLS USING condition is merged into the query as an AND predicate, so an
+      // explicit WHERE id = <other-tenant> still returns 0 rows.
       expect(rows).toHaveLength(0);
     });
   });
