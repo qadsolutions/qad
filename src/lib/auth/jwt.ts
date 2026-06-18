@@ -23,9 +23,38 @@ export type AppRole = "admin" | "user" | "platform_admin";
  * that drives RLS. Overwriting it would break row-level security.
  */
 export interface AppJwtClaims {
+  /**
+   * Tenant the caller belongs to. Optional `string` — NOT `string | null` —
+   * deliberately: the access-token hook *omits* this claim entirely for a
+   * tenant-less `platform_admin` (it never emits `null`). So at the JWT layer the
+   * only states are "present string" or "absent (undefined)".
+   *
+   * This diverges on purpose from the DB column `users.tenant_id uuid | null`
+   * (#69). When #22 generates DB types, do NOT "align" this claim type to
+   * `string | null` — a `null` here would be a malformed token, and the absence
+   * is what `extractTenantContext` keys on.
+   */
   tenant_id?: string;
   user_role?: AppRole;
 }
+
+/**
+ * Compile-time backstop for the deliberate `tenant_id?: string` choice above.
+ *
+ * `Expect<T extends true>` only accepts `true`. `_TenantIdExcludesNull` evaluates
+ * to `true` exactly while `null` is NOT assignable to the claim type. If anyone
+ * widens `AppJwtClaims["tenant_id"]` to include `null` (e.g. "aligning" it with the
+ * DB column `users.tenant_id uuid | null` at #22), it flips to `false`, violates the
+ * `extends true` constraint, and breaks `tsc --noEmit` in CI. A comment alone could
+ * be ignored; this cannot.
+ */
+type Expect<T extends true> = T;
+// Intentionally unreferenced: *declaring* the alias is what forces tsc to evaluate
+// the `extends true` constraint. There is nothing to "use", so silence the report.
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+type _TenantIdExcludesNull = Expect<
+  [null] extends [AppJwtClaims["tenant_id"]] ? false : true
+>;
 
 /**
  * The decoded access-token payload: the standard Supabase/JWT registered claims
@@ -87,6 +116,13 @@ export function extractTenantContext(payload: SupabaseJwtPayload): TenantContext
   return {
     userId: payload.sub,
     tenantId,
+    // Unknown / missing role falls back to "user" by design: it is the LEAST
+    // privileged role (Client Portal, query-only), so an unrecognised claim
+    // fails safe rather than escalating. Do not change this to throw or to
+    // default to a higher role without revisiting the threat model.
+    // TODO(#75): this fallback is currently silent — emit a structured
+    // `auth.role_fallback` event here once M9 adds the logging/alerting sink, so a
+    // hook regression that downgrades privilege leaves a trace instead of vanishing.
     role: isAppRole(payload.user_role) ? payload.user_role : "user",
   };
 }
