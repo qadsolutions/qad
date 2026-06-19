@@ -28,6 +28,10 @@
 create or replace function public.enforce_conversation_user_tenant()
 returns trigger
 language plpgsql
+-- Pin search_path to empty so the function does not depend on the caller's
+-- search_path (Supabase linter: function_search_path_mutable). The body already
+-- schema-qualifies every reference (public.users), so an empty search_path is safe.
+set search_path = ''
 as $$
 declare
   user_tenant_id uuid;
@@ -53,6 +57,11 @@ begin
 end;
 $$;
 
+-- NOTE: this invariant is enforced on the conversations-write side ONLY. If a
+-- user's tenant_id is later mutated, pre-existing conversations are NOT
+-- re-validated against the new value — this is a deliberate scope decision, not
+-- an oversight, and is intentionally not backstopped with a second trigger on
+-- users (low practical risk; users.tenant_id is effectively immutable post-creation).
 create trigger enforce_conversation_user_tenant
   before insert or update on public.conversations
   for each row
