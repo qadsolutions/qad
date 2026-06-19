@@ -183,6 +183,29 @@ describe("embeddings uniqueness (embeddings_chunk_model_uq)", () => {
       model_version: "nomic-embed-text-v2",
     });
   });
+
+  it("accepts two different chunk_ids under the same model_version (proves model_version alone isn't the key)", async () => {
+    // Symmetric to the test above: a regression to a model_version-only constraint
+    // would wrongly reject this. Uses two disposable chunks scoped to this test —
+    // NOT the shared CHUNK_A2_ID/CHUNK_A3_ID fixtures, which are later re-inserted
+    // under 'nomic-embed-text' by the similarity-search describe below and would
+    // collide with embeddings_chunk_model_uq if reused here under the same model.
+    const chunkX = "11111111-1111-1111-1111-0000000000d9";
+    const chunkY = "11111111-1111-1111-1111-0000000000da";
+    await sql`
+      INSERT INTO public.document_chunks (id, document_id, tenant_id, chunk_text, chunk_index, token_count) VALUES
+        (${chunkX}, ${DOC_A_ID}, ${TENANT_A_ID}, 'chunk x', 10, 2),
+        (${chunkY}, ${DOC_A_ID}, ${TENANT_A_ID}, 'chunk y', 11, 2)
+    `;
+    const rows = await sql<{ chunk_id: string; model_version: string }[]>`
+      INSERT INTO public.embeddings (chunk_id, tenant_id, embedding, model_version) VALUES
+        (${chunkX}, ${TENANT_A_ID}, ${vectorLiteral(unitish(40))}::vector, 'nomic-embed-text'),
+        (${chunkY}, ${TENANT_A_ID}, ${vectorLiteral(unitish(41))}::vector, 'nomic-embed-text')
+      RETURNING chunk_id, model_version
+    `;
+    expect(rows).toHaveLength(2);
+    expect(rows.map((r) => r.chunk_id).sort()).toEqual([chunkX, chunkY].sort());
+  });
 });
 
 describe("HNSW index (#20 acceptance criterion)", () => {
