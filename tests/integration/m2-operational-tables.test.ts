@@ -24,9 +24,18 @@ import { bootstrapTestDatabase } from "../helpers/setup-test-db";
  *     issues per request (SET LOCAL ROLE authenticated + set the jwt claims GUC),
  *     mirroring tests/integration/tenant-isolation.test.ts.
  *
- * Out of scope per issue #21 Notes (deferred to M9): audit-log immutability,
- * retention-job deletes, and the "NULL tenant_id ⇒ actor is platform_admin"
- * write-path invariant. We only verify the column is genuinely nullable.
+ * Out of scope per issue #21 Notes (deferred to M9): the audit-log UPDATE/DELETE
+ * restriction (the immutability *trigger*) and the "NULL tenant_id ⇒ actor is
+ * platform_admin" write-path invariant. We only verify tenant_id is genuinely
+ * nullable.
+ *
+ * In scope here (review feedback on #81): the FK ON DELETE actions that protect
+ * the audit trail and usage history from cascade-deletion —
+ *   - audit_logs.user_id   ON DELETE RESTRICT  (SECURITY.md §5: actor never lost)
+ *   - audit_logs.tenant_id  ON DELETE SET NULL (compliance row survives a tenant delete)
+ *   - model_calls.user_id   ON DELETE SET NULL (usage row survives a user delete)
+ * plus the CHECK constraints (retrieval_logs parallel-array cardinality match,
+ * model_calls non-negative counts).
  */
 
 const TENANT_A_ID = "11111111-1111-1111-1111-111111111111";
@@ -154,6 +163,21 @@ describe("retrieval_logs", () => {
     ).rejects.toThrow(/violates foreign key constraint "retrieval_logs_msg_tenant_fk"/);
   });
 
+  it("rejects mismatched parallel-array lengths (retrieval_logs_arrays_same_length)", async () => {
+    // Two chunk_ids but only one similarity_score — the i-th score no longer pairs
+    // with the i-th chunk. The CHECK must reject this before it can misalign scores.
+    await expect(
+      sql`
+        INSERT INTO public.retrieval_logs
+          (message_id, tenant_id, chunk_ids, similarity_scores)
+        VALUES
+          (${MESSAGE_A_ID}, ${TENANT_A_ID},
+           ${sql.array([CHUNK_ID_1, CHUNK_ID_2])}::uuid[],
+           ${sql.array([0.91])}::double precision[])
+      `,
+    ).rejects.toThrow(/violates check constraint "retrieval_logs_arrays_same_length"/);
+  });
+
   it("RLS: Tenant A session sees zero of Tenant B's retrieval_logs", async () => {
     // Seed one row for each tenant (as owner, bypassing RLS).
     await sql`
@@ -201,6 +225,16 @@ describe("model_calls", () => {
     });
   });
 
+  it("rejects negative token/latency counts (model_calls_nonnegative_counts)", async () => {
+    await expect(
+      sql`
+        INSERT INTO public.model_calls
+          (tenant_id, user_id, model_name, prompt_tokens, completion_tokens, latency_ms)
+        VALUES (${TENANT_A_ID}, ${USER_A_ID}, 'llama3.3-70b', -1, 5, 100)
+      `,
+    ).rejects.toThrow(/violates check constraint "model_calls_nonnegative_counts"/);
+  });
+
   it("RLS: Tenant A session sees zero of Tenant B's model_calls", async () => {
     await sql`
       INSERT INTO public.model_calls
@@ -212,6 +246,36 @@ describe("model_calls", () => {
     );
     expect(rows.length).toBeGreaterThan(0);
     expect(rows.every((r) => r.tenant_id === TENANT_A_ID)).toBe(true);
+  });
+
+  it("deleting a user preserves their model_calls row with user_id set to NULL (ON DELETE SET NULL)", async () => {
+    // Disposable user scoped to this test — must NOT touch the shared USER_A/USER_B
+    // fixtures other tests depend on. Belongs to TENANT_A so RLS/FK shape is realistic.
+    const disposableUserId = "11111111-1111-1111-1111-00000000de01";
+    await sql`INSERT INTO auth.users (id, email) VALUES (${disposableUserId}, 'mc-del@op.test')`;
+    await sql`
+      INSERT INTO public.users (id, tenant_id, email, role)
+      VALUES (${disposableUserId}, ${TENANT_A_ID}, 'mc-del@op.test', 'user')
+    `;
+    const inserted = await sql<{ id: string }[]>`
+      INSERT INTO public.model_calls
+        (tenant_id, user_id, model_name, prompt_tokens, completion_tokens, latency_ms)
+      VALUES (${TENANT_A_ID}, ${disposableUserId}, 'llama3.3-70b', 7, 3, 50)
+      RETURNING id
+    `;
+    const callId = inserted[0].id;
+
+    // Deleting the user must succeed and leave the usage row behind, actor-link nulled.
+    await sql`DELETE FROM public.users WHERE id = ${disposableUserId}`;
+
+    const rows = await sql<{ user_id: string | null }[]>`
+      SELECT user_id FROM public.model_calls WHERE id = ${callId}
+    `;
+    expect(rows).toHaveLength(1);
+    expect(rows[0].user_id).toBeNull();
+
+    // Cleanup so this row does not leak into other tests' counts.
+    await sql`DELETE FROM public.model_calls WHERE id = ${callId}`;
   });
 });
 
@@ -271,6 +335,75 @@ describe("audit_logs", () => {
     expect(rows.every((r) => r.tenant_id === TENANT_A_ID)).toBe(true);
     expect(rows.some((r) => r.tenant_id === null)).toBe(false);
   });
+
+  it("blocks deleting a user who has audit_logs rows (user_id ON DELETE RESTRICT, SECURITY.md §5)", async () => {
+    // SECURITY.md §5: "user_id is always set, so actor attribution is never lost" and
+    // "There is no ad-hoc delete path." A user with audit history must not be deletable
+    // out from under their audit rows — RESTRICT must block the delete, and crucially the
+    // audit row must still exist afterwards (never silently cascaded away).
+    const actorId = "11111111-1111-1111-1111-00000000a101";
+    await sql`INSERT INTO auth.users (id, email) VALUES (${actorId}, 'al-actor@op.test')`;
+    await sql`
+      INSERT INTO public.users (id, tenant_id, email, role)
+      VALUES (${actorId}, ${TENANT_A_ID}, 'al-actor@op.test', 'user')
+    `;
+    const inserted = await sql<{ id: string }[]>`
+      INSERT INTO public.audit_logs (tenant_id, user_id, action, resource_type)
+      VALUES (${TENANT_A_ID}, ${actorId}, 'document.view', 'document')
+      RETURNING id
+    `;
+    const auditId = inserted[0].id;
+
+    await expect(
+      sql`DELETE FROM public.users WHERE id = ${actorId}`,
+    ).rejects.toThrow(/violates foreign key constraint .*audit_logs.*/);
+
+    // The audit row — and the actor link — survive the blocked delete.
+    const rows = await sql<{ user_id: string }[]>`
+      SELECT user_id FROM public.audit_logs WHERE id = ${auditId}
+    `;
+    expect(rows).toHaveLength(1);
+    expect(rows[0].user_id).toBe(actorId);
+
+    // Cleanup (owner context bypasses the §5 immutability trigger, which is M9 anyway).
+    await sql`DELETE FROM public.audit_logs WHERE id = ${auditId}`;
+    await sql`DELETE FROM public.users WHERE id = ${actorId}`;
+    await sql`DELETE FROM auth.users WHERE id = ${actorId}`;
+  });
+
+  it("deleting a tenant preserves its audit_logs rows with tenant_id set to NULL (ON DELETE SET NULL)", async () => {
+    // A tenant CASCADE delete would silently destroy that tenant's compliance record
+    // (§5: "There is no ad-hoc delete path"). SET NULL keeps the row; tenant_id is already
+    // nullable with fleet-wide semantics, so the row becomes tenant-less audit history.
+    //
+    // The actor is PLATFORM_ADMIN_ID (no tenant, so NOT cascade-deleted when the tenant
+    // goes away — users.tenant_id is ON DELETE CASCADE). This isolates the tenant_id
+    // SET NULL behaviour from the user_id RESTRICT behaviour: only tenant_id changes here.
+    const dispTenantId = "33333333-3333-3333-3333-333333333333";
+    await sql`
+      INSERT INTO public.tenants (id, name, slug, is_active)
+      VALUES (${dispTenantId}, 'Disposable Tenant', 'op-tenant-disp', true)
+    `;
+    const inserted = await sql<{ id: string }[]>`
+      INSERT INTO public.audit_logs (tenant_id, user_id, action, resource_type)
+      VALUES (${dispTenantId}, ${PLATFORM_ADMIN_ID}, 'admin.action', 'tenant')
+      RETURNING id
+    `;
+    const auditId = inserted[0].id;
+
+    // Delete the tenant. SET NULL must preserve the audit row, nulling only tenant_id.
+    await sql`DELETE FROM public.tenants WHERE id = ${dispTenantId}`;
+
+    const rows = await sql<{ tenant_id: string | null; user_id: string }[]>`
+      SELECT tenant_id, user_id FROM public.audit_logs WHERE id = ${auditId}
+    `;
+    expect(rows).toHaveLength(1);
+    expect(rows[0].tenant_id).toBeNull();
+    expect(rows[0].user_id).toBe(PLATFORM_ADMIN_ID); // actor link untouched
+
+    // Cleanup (owner context bypasses the §5 immutability trigger, which is M9 anyway).
+    await sql`DELETE FROM public.audit_logs WHERE id = ${auditId}`;
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -317,5 +450,24 @@ describe("settings", () => {
     `;
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ tenant_id: TENANT_B_ID, key: "theme" });
+  });
+
+  it("RLS: Tenant A session sees zero of Tenant B's settings", async () => {
+    // Mirror of the retrieval_logs/model_calls/audit_logs RLS tests: seed a row for each
+    // tenant as owner (bypassing RLS), then assert the Tenant A session sees only its own.
+    // Use a distinct key so this test is self-contained regardless of execution order.
+    await sql`
+      INSERT INTO public.settings (tenant_id, key, value)
+      VALUES (${TENANT_A_ID}, 'rls-probe', ${sql.json({ owner: "a" })})
+    `;
+    await sql`
+      INSERT INTO public.settings (tenant_id, key, value)
+      VALUES (${TENANT_B_ID}, 'rls-probe', ${sql.json({ owner: "b" })})
+    `;
+    const rows = await asUser(TENANT_A_ID, USER_A_ID, (tx) =>
+      tx<{ tenant_id: string }[]>`SELECT tenant_id FROM public.settings`,
+    );
+    expect(rows.length).toBeGreaterThan(0);
+    expect(rows.every((r) => r.tenant_id === TENANT_A_ID)).toBe(true);
   });
 });

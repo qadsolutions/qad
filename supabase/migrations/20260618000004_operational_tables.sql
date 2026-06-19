@@ -58,7 +58,12 @@ create table public.retrieval_logs (
   -- Composite FK (not a plain message_id FK) so a log's tenant_id can never disagree
   -- with its message's tenant_id — see the messages_id_tenant_uq note above.
   constraint retrieval_logs_msg_tenant_fk
-    foreign key (message_id, tenant_id) references public.messages (id, tenant_id) on delete cascade
+    foreign key (message_id, tenant_id) references public.messages (id, tenant_id) on delete cascade,
+  -- chunk_ids and similarity_scores are positionally-paired parallel arrays (the i-th
+  -- score belongs to the i-th chunk). Nothing else enforces that pairing, so a length
+  -- mismatch would silently misalign scores; require equal cardinality at the DB layer.
+  constraint retrieval_logs_arrays_same_length
+    check (cardinality(chunk_ids) = cardinality(similarity_scores))
 );
 
 create index retrieval_logs_tenant_id_idx on public.retrieval_logs (tenant_id);
@@ -79,12 +84,21 @@ create policy "retrieval_logs: select own tenant"
 create table public.model_calls (
   id                uuid        primary key default gen_random_uuid(),
   tenant_id         uuid        not null references public.tenants (id) on delete cascade,
-  user_id           uuid        not null references public.users (id) on delete cascade,
+  -- on delete set null (not cascade): a usage/billing row must outlive the user who
+  -- made the call — deleting a user must not erase their usage history. model_calls is
+  -- NOT a compliance-mandated immutable log (unlike audit_logs, see §5 below), so simply
+  -- dropping the actor link (nullable + set null) is sufficient here; the accounting row
+  -- survives with user_id NULL.
+  user_id           uuid        references public.users (id) on delete set null,
   model_name        text        not null,
   prompt_tokens     integer     not null,
   completion_tokens integer     not null,
   latency_ms        integer     not null,
-  created_at        timestamptz not null default now()
+  created_at        timestamptz not null default now(),
+  -- Token/latency counts are physically non-negative; reject negative values rather
+  -- than letting a buggy writer poison usage accounting.
+  constraint model_calls_nonnegative_counts
+    check (prompt_tokens >= 0 and completion_tokens >= 0 and latency_ms >= 0)
 );
 
 create index model_calls_tenant_id_idx on public.model_calls (tenant_id);
@@ -103,13 +117,25 @@ create policy "model_calls: select own tenant"
 -- call (SECURITY.md §5). tenant_id is NULLABLE (Option A): it records the tenant
 -- an action affected; a fleet-wide platform_admin action stores NULL. user_id is
 -- NOT NULL — the actor is always known. resource_id is nullable (not every action
--- targets a single resource). Immutability/retention hardening is M9, not here.
+-- targets a single resource). Immutability/retention hardening is M9, not here —
+-- but the FK delete actions below are part of that immutability invariant: an audit
+-- row may never be silently destroyed by deleting its tenant or actor (see §5,
+-- "There is no ad-hoc delete path"), so neither FK is ON DELETE CASCADE.
 -- ---------------------------------------------------------------------------
 
 create table public.audit_logs (
   id            uuid        primary key default gen_random_uuid(),
-  tenant_id     uuid        references public.tenants (id) on delete cascade,
-  user_id       uuid        not null references public.users (id) on delete cascade,
+  -- on delete set null (NOT cascade): audit_logs is append-only/immutable
+  -- (SECURITY.md §5) — "There is no ad-hoc delete path." A tenant CASCADE delete would
+  -- silently destroy that tenant's compliance record. SET NULL is safe because tenant_id
+  -- is already nullable with documented fleet-wide (NULL) semantics, so a deleted tenant's
+  -- rows simply become tenant-less audit history rather than disappearing.
+  tenant_id     uuid        references public.tenants (id) on delete set null,
+  -- on delete restrict (NOT cascade, NOT set null): SECURITY.md §5 — "user_id is always
+  -- set, so actor attribution is never lost." Keep NOT NULL and block the user delete
+  -- entirely; deleting an actor who has audit rows must go through an explicit teardown
+  -- path, never silently drop the actor link or the row.
+  user_id       uuid        not null references public.users (id) on delete restrict,
   action        text        not null,
   resource_type text        not null,
   resource_id   uuid,
@@ -118,6 +144,9 @@ create table public.audit_logs (
 );
 
 create index audit_logs_tenant_id_idx on public.audit_logs (tenant_id);
+-- The M9 90-day retention sweep deletes by age (DELETE ... WHERE created_at < ...);
+-- index created_at so that scan is not a full table scan.
+create index audit_logs_created_at_idx on public.audit_logs (created_at);
 
 alter table public.audit_logs enable row level security;
 
