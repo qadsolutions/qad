@@ -152,6 +152,39 @@ describe("embeddings tenant-consistency FK (embeddings_chunk_tenant_fk)", () => 
   });
 });
 
+describe("embeddings uniqueness (embeddings_chunk_model_uq)", () => {
+  // The migration header asserts "one row per document_chunk". The composite
+  // UNIQUE (chunk_id, model_version) makes that invariant real (#80 review):
+  // a second row for the same chunk under the SAME model is rejected, but the
+  // same chunk under a DIFFERENT model_version is allowed (re-embedding support).
+  it("rejects a second embedding with the same chunk_id AND same model_version", async () => {
+    // CHUNK_A1_ID already has a row from the first test, model_version
+    // 'nomic-embed-text'. A second insert with that same pair is a true duplicate.
+    const literal = vectorLiteral(unitish(2));
+    await expect(
+      sql`
+        INSERT INTO public.embeddings (chunk_id, tenant_id, embedding, model_version)
+        VALUES (${CHUNK_A1_ID}, ${TENANT_A_ID}, ${literal}::vector, 'nomic-embed-text')
+      `,
+    ).rejects.toThrow(/violates unique constraint "embeddings_chunk_model_uq"/);
+  });
+
+  it("accepts the same chunk_id under a DIFFERENT model_version (proves the composite key)", async () => {
+    // Same chunk, newer model — the intentional re-embedding path. A bare
+    // UNIQUE (chunk_id) would wrongly reject this; the composite key permits it.
+    const literal = vectorLiteral(unitish(3));
+    const rows = await sql<{ chunk_id: string; model_version: string }[]>`
+      INSERT INTO public.embeddings (chunk_id, tenant_id, embedding, model_version)
+      VALUES (${CHUNK_A1_ID}, ${TENANT_A_ID}, ${literal}::vector, 'nomic-embed-text-v2')
+      RETURNING chunk_id, model_version
+    `;
+    expect(rows[0]).toMatchObject({
+      chunk_id: CHUNK_A1_ID,
+      model_version: "nomic-embed-text-v2",
+    });
+  });
+});
+
 describe("HNSW index (#20 acceptance criterion)", () => {
   it("creates an index on embeddings.embedding using the hnsw access method", async () => {
     // Prove the DDL produced a real hnsw index, not just that the migration ran.

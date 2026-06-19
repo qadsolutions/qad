@@ -55,7 +55,13 @@ create table public.embeddings (
   -- on delete cascade so re-ingestion (delete chunks → embeddings go too) and
   -- tenant teardown both clean up vectors automatically.
   constraint embeddings_chunk_tenant_fk
-    foreign key (chunk_id, tenant_id) references public.document_chunks (id, tenant_id) on delete cascade
+    foreign key (chunk_id, tenant_id) references public.document_chunks (id, tenant_id) on delete cascade,
+  -- Enforce the header's "one row per document_chunk" invariant (#80 review). The
+  -- key is COMPOSITE on (chunk_id, model_version), not bare chunk_id, so re-embedding
+  -- the same chunk under a NEWER model_version stays allowed (the intentional
+  -- multi-model-version support noted above) while a true duplicate — same chunk,
+  -- same model, inserted twice without first deleting the old row — is rejected.
+  constraint embeddings_chunk_model_uq unique (chunk_id, model_version)
 );
 
 -- HNSW index for approximate-nearest-neighbour cosine similarity search — the
@@ -63,6 +69,20 @@ create table public.embeddings (
 -- continuously-added documents without VACUUM/lists tuning (CLAUDE.md "pgvector
 -- Index"). vector_cosine_ops matches the cosine distance operator (<=>) used at
 -- query time.
+--
+-- FILTERED-RECALL LIMITATION (#80 review — M4 retrieval layer must account for this).
+-- The RAG query is `WHERE tenant_id = $1 ORDER BY embedding <=> $2 LIMIT k`. pgvector
+-- applies the `tenant_id` predicate as a POST-FILTER over the HNSW candidate set
+-- (default hnsw.ef_search = 40): the index first gathers candidates by vector
+-- distance ignoring tenant_id, then the tenant filter drops the non-matching ones.
+-- In this shared multi-tenant index a tenant's true nearest neighbours can sit
+-- outside that candidate window, so the query can silently return FEWER than k rows
+-- — or lower-quality matches — at scale, even though more qualifying rows exist.
+-- This is NOT a blocker for M2 (correctness is unaffected; only recall is) and needs
+-- no schema change now — it is a documented limitation the M4 retrieval layer owns.
+-- Mitigations to weigh at M4: raise `hnsw.ef_search` per query (e.g. SET LOCAL
+-- hnsw.ef_search), adopt pgvector >= 0.8 iterative index scans, or partition the
+-- index per tenant.
 create index embeddings_embedding_hnsw_idx
   on public.embeddings
   using hnsw (embedding vector_cosine_ops)
