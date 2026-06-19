@@ -18,11 +18,14 @@
 -- JWT claim, so it is invisible to every tenant-scoped client and reachable only via
 -- service_role (the platform console, M11).
 --
--- OUT OF SCOPE (deferred to M9, per issue #21's own Notes): audit-log immutability
--- (UPDATE/DELETE restriction), the 90-day retention job, and the "NULL tenant_id ⇒
--- actor is platform_admin" write-path invariant. SECURITY.md §5 describes those, but
--- this issue only creates the table with the right shape, RLS, and grants. audit_logs
--- therefore gets the same standard service_role grant as every other table; M9 will
+-- OUT OF SCOPE (deferred to M9, per issue #21's own Notes): the audit-log immutability
+-- TRIGGER (blocking UPDATE/DELETE outright), the 90-day retention job, and the "NULL
+-- tenant_id ⇒ actor is platform_admin" write-path invariant. SECURITY.md §5 describes
+-- those. What IS in scope here: the FK ON DELETE actions below (SET NULL / RESTRICT,
+-- never CASCADE on audit_logs) — a first, partial layer of that same §5 immutability
+-- mandate, since a CASCADE would let a tenant/user delete silently destroy audit rows
+-- before M9's trigger ever exists to stop it. audit_logs otherwise gets the same
+-- standard service_role grant as every other table; M9 will
 -- tighten it.
 
 -- ---------------------------------------------------------------------------
