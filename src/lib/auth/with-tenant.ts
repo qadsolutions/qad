@@ -20,7 +20,6 @@
  *   });
  */
 
-import type { SupabaseClient } from "@supabase/supabase-js";
 import type { NextRequest } from "next/server";
 
 import {
@@ -29,7 +28,10 @@ import {
   type SupabaseJwtPayload,
   type TenantContext,
 } from "@/lib/auth/jwt";
-import { createSupabaseServerClient } from "@/lib/supabase/server";
+import {
+  createSupabaseServerClient,
+  type TypedSupabaseClient,
+} from "@/lib/supabase/server";
 
 /** A validation failure mapped to an HTTP status. Thrown internally, never escapes. */
 export class TenantValidationError extends Error {
@@ -47,8 +49,8 @@ export class TenantValidationError extends Error {
 export interface TenantHandlerContext {
   /** Validated tenant context — `tenantId` is a guaranteed non-null string. */
   tenant: TenantContext;
-  /** RLS-scoped anon-key client; reuse it for all DB access in the handler. */
-  supabase: SupabaseClient;
+  /** RLS-scoped, schema-typed anon-key client; reuse it for all DB access in the handler. */
+  supabase: TypedSupabaseClient;
 }
 
 export type TenantRouteHandler = (
@@ -58,7 +60,7 @@ export type TenantRouteHandler = (
 
 export interface WithTenantOptions {
   /** Override the Supabase client factory (used by tests). Defaults to the real one. */
-  createClient?: () => Promise<SupabaseClient>;
+  createClient?: () => Promise<TypedSupabaseClient>;
 }
 
 /**
@@ -67,7 +69,7 @@ export interface WithTenantOptions {
  * Exported for direct unit testing. Throws {@link TenantValidationError} on any
  * failure; returns the validated context on success.
  */
-export async function validateTenant(supabase: SupabaseClient): Promise<TenantContext> {
+export async function validateTenant(supabase: TypedSupabaseClient): Promise<TenantContext> {
   // Step 1: verify the JWT. getClaims() validates the token (signature/expiry);
   // a null payload or error means no usable authenticated session.
   const { data, error } = await supabase.auth.getClaims();

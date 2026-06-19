@@ -12,6 +12,16 @@ import { createServerClient } from "@supabase/ssr";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { cookies } from "next/headers";
 
+import type { Database } from "@/lib/supabase/database.types";
+
+/**
+ * Tenant-scoped, fully-typed Supabase client. The {@link Database} generic flows
+ * column types from the generated schema (issue #22) into every `.from(...).select()`,
+ * so a query against a column that does not exist — or a misread of a nullable column
+ * like `users.tenant_id` — is a compile error, not a runtime surprise.
+ */
+export type TypedSupabaseClient = SupabaseClient<Database>;
+
 /**
  * Read a required public env var or fail loudly at call time.
  *
@@ -36,10 +46,10 @@ function requireEnv(name: "NEXT_PUBLIC_SUPABASE_URL" | "NEXT_PUBLIC_SUPABASE_ANO
  *
  * Next.js 16: `cookies()` is async, so this helper is async too.
  */
-export async function createSupabaseServerClient(): Promise<SupabaseClient> {
+export async function createSupabaseServerClient(): Promise<TypedSupabaseClient> {
   const cookieStore = await cookies();
 
-  return createServerClient(
+  return createServerClient<Database>(
     requireEnv("NEXT_PUBLIC_SUPABASE_URL"),
     requireEnv("NEXT_PUBLIC_SUPABASE_ANON_KEY"),
     {
