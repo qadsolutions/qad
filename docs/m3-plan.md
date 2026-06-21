@@ -17,7 +17,8 @@ decisions locked on 2026-06-20.
 ## Dependency graph
 
 ```
-M2 (documents, chunks, embeddings, Storage — done)
+M2 (documents, chunks, embeddings, Storage — schema complete; #15's RLS-isolation
+    test for this chain is in flight via #83, no schema impact on M3 either way)
         │
         ├── #23 Upload endpoint ──────────────────┐ (calls the worker trigger)
         ├── #24 Parsers ───────────┐              │
