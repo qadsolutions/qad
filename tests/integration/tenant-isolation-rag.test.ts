@@ -1,7 +1,8 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import postgres from "postgres";
-import type { TransactionSql } from "postgres";
 import { bootstrapTestDatabase } from "../helpers/setup-test-db";
+import { unitish, vectorLiteral } from "../helpers/vector-test-utils";
+import { createAsUser } from "../helpers/as-user";
 
 /**
  * Cross-tenant isolation on the RAG retrieval path (issue #15).
@@ -13,16 +14,17 @@ import { bootstrapTestDatabase } from "../helpers/setup-test-db";
  *
  *   the question a buggy retrieval query could get wrong is "did the vector search
  *   leak another tenant's chunk because the nearest neighbour happened to belong to
- *   them?" So Tenant B is seeded with the vector that is the GLOBAL nearest neighbour
- *   to the query, and we assert a Tenant A session's similarity search never returns
- *   it — RLS filters the ANN path just as it filters a plain SELECT.
+ *   them?" So Tenant B is seeded with the vector that is the unique, unambiguous
+ *   global nearest neighbour to the query (Tenant A's closest vector is deliberately
+ *   tilted off-axis below so it can't tie with it — cosine distance depends only on
+ *   direction, so two vectors on the same single axis are distance-0 from each other
+ *   regardless of magnitude), and we assert a Tenant A session's similarity search
+ *   never returns it — RLS filters the ANN path just as it filters a plain SELECT.
  *
  * Same asUser() simulation as tenant-isolation.test.ts: SET LOCAL ROLE authenticated
  * + set request.jwt.claims, the two statements PostgREST issues per request. Seeding
  * runs as the table owner (qad_user) so RLS does not interfere with setup.
  */
-
-const EMBEDDING_DIM = 768;
 
 const TENANT_A_ID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
 const TENANT_B_ID = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
@@ -42,35 +44,26 @@ const CHUNK_B1_ID = "bbbbbbbb-bbbb-bbbb-bbbb-00000000c001";
 const HOT = 100;
 
 let sql: ReturnType<typeof postgres>;
+let asUser: ReturnType<typeof createAsUser>;
 
-/** Build a pgvector literal '[v0,…,v767]' (the driver doesn't serialize number[]). */
-function vectorLiteral(values: readonly number[]): string {
-  return `[${values.join(",")}]`;
-}
-
-/** A 768-length vector that is `value` at index `hotIndex`, else 0. */
-function unitish(hotIndex: number, value = 1): number[] {
-  const v = new Array<number>(EMBEDDING_DIM).fill(0);
-  v[hotIndex] = value;
+/**
+ * A vector near the query but deliberately NOT a scalar multiple of it: same hot
+ * dimension as `unitish(hotIndex, ...)`, plus a small component one dimension over.
+ * Cosine distance depends only on direction, so a vector that's purely on the same
+ * single axis as the query — any unitish(hotIndex, value) — is distance 0 from it
+ * regardless of magnitude. Tilting off that axis breaks what would otherwise be an
+ * unintended exact tie, so this is unambiguously farther from the query than a
+ * same-axis vector, while still being far closer than an orthogonal one.
+ */
+function tiltedNear(hotIndex: number, value: number, tilt: number): number[] {
+  const v = unitish(hotIndex, value);
+  v[hotIndex + 1] = tilt;
   return v;
-}
-
-/** Run `query` as a simulated Supabase authenticated session — see tenant-isolation.test.ts. */
-async function asUser<T>(
-  tenantId: string,
-  userId: string,
-  query: (tx: TransactionSql) => Promise<T>,
-): Promise<T> {
-  return sql.begin(async (tx) => {
-    await tx`SET LOCAL ROLE authenticated`;
-    const claims = JSON.stringify({ tenant_id: tenantId, sub: userId, role: "authenticated" });
-    await tx`SELECT set_config('request.jwt.claims', ${claims}, true)`;
-    return query(tx);
-  }) as Promise<T>;
 }
 
 beforeAll(async () => {
   sql = postgres(process.env.DATABASE_URL!, { max: 1 });
+  asUser = createAsUser(sql);
   await bootstrapTestDatabase(sql);
 
   await sql`
@@ -99,12 +92,16 @@ beforeAll(async () => {
       (${CHUNK_A2_ID}, ${DOC_A_ID}, ${TENANT_A_ID}, 'tenant A chunk two', 1, 4),
       (${CHUNK_B1_ID}, ${DOC_B_ID}, ${TENANT_B_ID}, 'tenant B SECRET chunk', 0, 4)
   `;
-  // Vectors all sit on dimension HOT. B1 == the query (distance ~0, the global nearest);
-  // A1 is close; A2 sits on a different dimension (far). So if a Tenant A retrieval ever
-  // leaked across tenants, B1 would top the results — making a leak impossible to miss.
+  // B1 sits exactly on the query's hot dimension (distance 0 — the unique global
+  // nearest neighbour). A1 is tilted slightly off that axis (see tiltedNear() above)
+  // so it is strictly farther than B1, not tied with it — a plain unitish(HOT, 0.9)
+  // would be an unintended exact tie, since cosine distance ignores magnitude. A2
+  // sits on a different dimension entirely (distance 1, far). So if a Tenant A
+  // retrieval ever leaked across tenants, B1 would unambiguously top the results —
+  // making a leak impossible to miss.
   await sql`
     INSERT INTO public.embeddings (chunk_id, tenant_id, embedding, model_version) VALUES
-      (${CHUNK_A1_ID}, ${TENANT_A_ID}, ${vectorLiteral(unitish(HOT, 0.9))}::vector, 'nomic-embed-text'),
+      (${CHUNK_A1_ID}, ${TENANT_A_ID}, ${vectorLiteral(tiltedNear(HOT, 0.9, 0.1))}::vector, 'nomic-embed-text'),
       (${CHUNK_A2_ID}, ${TENANT_A_ID}, ${vectorLiteral(unitish(HOT + 50))}::vector, 'nomic-embed-text'),
       (${CHUNK_B1_ID}, ${TENANT_B_ID}, ${vectorLiteral(unitish(HOT, 1.0))}::vector, 'nomic-embed-text')
   `;
@@ -147,8 +144,10 @@ describe("RAG retrieval path: cross-tenant isolation (#15)", () => {
 
   describe("pgvector similarity search (HNSW path) filtered by tenant_id", () => {
     // The query vector is identical to Tenant B's CHUNK_B1 embedding, so B1 is the
-    // global nearest neighbour. The retrieval query is the real RAG shape: rank
-    // embeddings by cosine distance and join to document_chunks for the chunk text.
+    // unique global nearest neighbour (Tenant A's nearest, A1, is tilted off-axis so
+    // it can't tie with B1 — see the seeding comment above). The retrieval query is
+    // the real RAG shape: rank embeddings by cosine distance and join to
+    // document_chunks for the chunk text.
     const queryVec = vectorLiteral(unitish(HOT, 1.0));
 
     it("Tenant A retrieval never returns Tenant B's nearest-neighbour chunk", async () => {
@@ -167,7 +166,7 @@ describe("RAG retrieval path: cross-tenant isolation (#15)", () => {
       expect(rows.every((r) => r.tenant_id === TENANT_A_ID)).toBe(true);
       expect(rows.some((r) => r.chunk_id === CHUNK_B1_ID)).toBe(false);
       expect(rows.some((r) => r.chunk_text.includes("SECRET"))).toBe(false);
-      // A's own nearest (A1, on the query's hot dimension) ranks first within A's view.
+      // A's own nearest (A1, tilted near the query's hot dimension) ranks first within A's view.
       expect(rows[0].chunk_id).toBe(CHUNK_A1_ID);
     });
 
