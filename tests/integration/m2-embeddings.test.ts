@@ -1,7 +1,8 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import postgres from "postgres";
-import type { TransactionSql } from "postgres";
 import { bootstrapTestDatabase } from "../helpers/setup-test-db";
+import { EMBEDDING_DIM, unitish, vectorLiteral } from "../helpers/vector-test-utils";
+import { createAsUser } from "../helpers/as-user";
 
 /**
  * Integration tests for the pgvector embeddings table (#20),
@@ -19,8 +20,6 @@ import { bootstrapTestDatabase } from "../helpers/setup-test-db";
  * Supabase authenticated session, mirroring tenant-isolation.test.ts.
  */
 
-const EMBEDDING_DIM = 768;
-
 const TENANT_A_ID = "11111111-1111-1111-1111-111111111111";
 const TENANT_B_ID = "22222222-2222-2222-2222-222222222222";
 const USER_A_ID = "11111111-1111-1111-1111-000000000001";
@@ -35,48 +34,12 @@ const CHUNK_A3_ID = "11111111-1111-1111-1111-00000000c003";
 // One chunk under Tenant B (for the RLS cross-tenant test).
 const CHUNK_B1_ID = "22222222-2222-2222-2222-00000000c001";
 
-/**
- * Build a pgvector literal: '[v0,v1,...,v767]'. pgvector accepts this cast to
- * ::vector. The `postgres` driver does not natively serialize a JS number[] to
- * the vector wire format, so we pass the literal string and cast in SQL.
- */
-function vectorLiteral(values: readonly number[]): string {
-  return `[${values.join(",")}]`;
-}
-
-/** A 768-length vector that is `value` at index `hotIndex`, else 0. */
-function unitish(hotIndex: number, value = 1): number[] {
-  const v = new Array<number>(EMBEDDING_DIM).fill(0);
-  v[hotIndex] = value;
-  return v;
-}
-
 let sql: ReturnType<typeof postgres>;
-
-/**
- * Run `query` as a simulated Supabase authenticated session for the given
- * tenant/user — same SET LOCAL ROLE + request.jwt.claims pattern PostgREST
- * issues per request (see tenant-isolation.test.ts).
- */
-async function asUser<T>(
-  tenantId: string,
-  userId: string,
-  query: (tx: TransactionSql) => Promise<T>,
-): Promise<T> {
-  return sql.begin(async (tx) => {
-    await tx`SET LOCAL ROLE authenticated`;
-    const claims = JSON.stringify({
-      tenant_id: tenantId,
-      sub: userId,
-      role: "authenticated",
-    });
-    await tx`SELECT set_config('request.jwt.claims', ${claims}, true)`;
-    return query(tx);
-  }) as Promise<T>;
-}
+let asUser: ReturnType<typeof createAsUser>;
 
 beforeAll(async () => {
   sql = postgres(process.env.DATABASE_URL!, { max: 1 });
+  asUser = createAsUser(sql);
   await bootstrapTestDatabase(sql);
 
   await sql`
