@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { DocumentParseError } from "@/lib/parsing/errors";
+import { parseDocx } from "@/lib/parsing/docx";
 import { parsePdf } from "@/lib/parsing/pdf";
 import { parseText } from "@/lib/parsing/text";
 
@@ -34,6 +35,21 @@ describe("parsePdf", () => {
   it("throws DocumentParseError(corrupt_file) for a non-PDF buffer", async () => {
     const buffer = Buffer.from("not a real pdf file at all");
     await expect(parsePdf(buffer)).rejects.toMatchObject({
+      code: "corrupt_file",
+    });
+  });
+});
+
+describe("parseDocx", () => {
+  it("extracts text from a real DOCX", async () => {
+    const buffer = readFileSync("tests/fixtures/sample.docx");
+    const text = await parseDocx(buffer);
+    expect(text).toContain("Hello World");
+  });
+
+  it("throws DocumentParseError(corrupt_file) for a non-DOCX buffer", async () => {
+    const buffer = Buffer.from("not a real docx file at all");
+    await expect(parseDocx(buffer)).rejects.toMatchObject({
       code: "corrupt_file",
     });
   });
