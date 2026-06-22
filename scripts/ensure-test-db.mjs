@@ -40,10 +40,13 @@ if (!existsSync(ENV_FILE)) {
 //    `--wait` blocks on the healthcheck defined in docker-compose.yml, so the suite
 //    never races a still-starting database. Returns fast when already running.
 try {
+  // `timeout` keeps the script best-effort: a stuck daemon, an indefinite image pull,
+  // or a healthcheck that never goes healthy throws ETIMEDOUT into the catch below
+  // (warn + continue) instead of blocking the whole `pnpm test` run forever.
   execFileSync(
     "docker",
     ["compose", "--profile", "test", "up", "-d", "--wait", "qad-test-db"],
-    { stdio: "ignore" },
+    { stdio: "ignore", timeout: 60_000 },
   );
   console.info("[test-db] qad-test-db is up on :5544");
 } catch {
