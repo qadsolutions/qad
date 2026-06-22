@@ -22,6 +22,30 @@ services:
         aliases:
           - postgres
 
+  # Ephemeral pgvector DB for the Vitest integration suite — mirrors CI's
+  # pgvector/pgvector:pg16 service. Opt-in via the "test" profile so the default
+  # `docker compose up` dev stack is unchanged:
+  #     docker compose --profile test up -d qad-test-db
+  # Host port 5544 avoids colliding with the dev Postgres (5433) and any native
+  # Postgres on 5432. Point the suite at it via .env.test.local (DATABASE_URL).
+  # No volume: the test bootstrap drops/recreates the schema each run, so a clean
+  # container is desirable and persistence would only risk stale state.
+  qad-test-db:
+    image: pgvector/pgvector:pg16
+    container_name: qad_test_db
+    profiles: ["test"]
+    environment:
+      POSTGRES_DB: qad_test
+      POSTGRES_USER: qad_user
+      POSTGRES_PASSWORD: testpassword
+    ports:
+      - "5544:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U qad_user -d qad_test"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   n8n:
     image: n8nio/n8n:latest
     container_name: qad-n8n

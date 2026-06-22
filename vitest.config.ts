@@ -1,4 +1,38 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+
 import { defineConfig } from "vitest/config";
+
+/**
+ * Load a gitignored `.env.test.local` (if present) into process.env before the config
+ * is evaluated, so local runs can point DATABASE_URL at a local pgvector test DB
+ * without per-run flags. Existing env vars always win, so CI — which sets these as real
+ * env vars and ships no `.env.test.local` — is unaffected. Minimal KEY=VALUE parser:
+ * no dotenv dependency, only simple surrounding-quote stripping (no interpolation).
+ */
+function loadTestEnvLocal(): void {
+  let content: string;
+  try {
+    content = readFileSync(resolve(process.cwd(), ".env.test.local"), "utf-8");
+  } catch {
+    return; // No file (e.g. CI) — nothing to load.
+  }
+  for (const line of content.split(/\r?\n/)) {
+    const match = /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/.exec(line);
+    if (!match) continue; // skip blanks and `#` comments
+    const key = match[1];
+    let value = match[2].trim();
+    if (
+      (value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"))
+    ) {
+      value = value.slice(1, -1);
+    }
+    if (process.env[key] === undefined) process.env[key] = value;
+  }
+}
+
+loadTestEnvLocal();
 
 /**
  * Vitest configuration for QAD Solutions.
