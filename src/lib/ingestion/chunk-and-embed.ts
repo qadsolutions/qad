@@ -30,7 +30,9 @@ function toVectorLiteral(values: readonly number[]): string {
  * Embedding runs before any DB write, so the most common failure (Ollama
  * unreachable) never touches the database. If the embeddings insert fails after
  * the chunks insert already succeeded, the just-inserted chunks are deleted so a
- * failure never leaves orphaned chunks with no vectors.
+ * failure never leaves orphaned chunks with no vectors — that cleanup is
+ * best-effort, so if it also fails, the cleanup error is folded into the thrown
+ * message rather than silently dropped (#26's re-ingestion is the real backstop).
  */
 export async function chunkAndEmbed(
   documentId: string,
@@ -75,14 +77,20 @@ export async function chunkAndEmbed(
 
   const { error: embeddingsError } = await supabase.from("embeddings").insert(embeddingRows);
   if (embeddingsError) {
-    await supabase
+    const { error: cleanupError } = await supabase
       .from("document_chunks")
       .delete()
       .in(
         "id",
         chunkRows.map((chunk) => chunk.id),
       );
-    throw new IngestionError("embedding_insert_failed", embeddingsError.message);
+    // Cleanup is best-effort, but a failure here means the just-inserted chunks are now
+    // orphaned (no vectors) — surface that in the thrown message rather than dropping it,
+    // since #26's re-ingestion is the real backstop and needs to know cleanup didn't land.
+    const message = cleanupError
+      ? `${embeddingsError.message} (cleanup of inserted chunks also failed, they may be orphaned: ${cleanupError.message})`
+      : embeddingsError.message;
+    throw new IngestionError("embedding_insert_failed", message);
   }
 
   return { chunkCount: chunkRows.length };

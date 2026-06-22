@@ -109,6 +109,19 @@ describe("createEmbedder — real Ollama selection", () => {
     await expect(embedder.embed(["hi"])).rejects.toThrow(EmbeddingDimensionError);
   });
 
+  it("throws a clear error (not EmbeddingDimensionError) when a 200 response has no `embeddings` field", async () => {
+    vi.stubEnv("INFERENCE_PROVIDER", "ollama");
+    vi.stubEnv("OLLAMA_EMBED_URL", "http://test-ollama:11434");
+    vi.stubEnv("EMBEDDING_MODEL", "nomic-embed-text");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(JSON.stringify({ error: "unexpected" }), { status: 200 })),
+    );
+
+    const embedder = createEmbedder();
+    await expect(embedder.embed(["hi"])).rejects.toThrow(/embeddings/i);
+  });
+
   it("returns an empty array without calling fetch for an empty input array", async () => {
     vi.stubEnv("INFERENCE_PROVIDER", "ollama");
     vi.stubEnv("OLLAMA_EMBED_URL", "http://test-ollama:11434");

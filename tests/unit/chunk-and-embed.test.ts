@@ -9,9 +9,15 @@ const TENANT_A = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
 const DOC_A = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
 
 /** Mock admin client supporting `.from("document_chunks"|"embeddings")`. */
-function mockAdmin(opts: { chunksInsertError?: unknown; embeddingsInsertError?: unknown } = {}) {
+function mockAdmin(
+  opts: {
+    chunksInsertError?: unknown;
+    embeddingsInsertError?: unknown;
+    chunksDeleteError?: unknown;
+  } = {},
+) {
   const chunksInsert = vi.fn(async () => ({ error: opts.chunksInsertError ?? null }));
-  const chunksDeleteIn = vi.fn(async () => ({ error: null }));
+  const chunksDeleteIn = vi.fn(async () => ({ error: opts.chunksDeleteError ?? null }));
   const chunksDelete = vi.fn(() => ({ in: chunksDeleteIn }));
   const embeddingsInsert = vi.fn(async () => ({ error: opts.embeddingsInsertError ?? null }));
 
@@ -92,5 +98,20 @@ describe("chunkAndEmbed", () => {
     const chunksInsertArgs = admin.chunksInsert.mock.calls[0] as unknown[];
     const insertedIds = (chunksInsertArgs[0] as Array<{ id: string }>).map((row) => row.id);
     expect(admin.chunksDeleteIn).toHaveBeenCalledExactlyOnceWith("id", insertedIds);
+  });
+
+  it("surfaces the cleanup failure in the thrown error when the compensating delete also fails", async () => {
+    mockAdmin({
+      embeddingsInsertError: { message: "unique violation" },
+      chunksDeleteError: { message: "delete blocked by FK" },
+    });
+
+    await expect(chunkAndEmbed(DOC_A, TENANT_A, "some real text here")).rejects.toMatchObject({
+      code: "embedding_insert_failed",
+      message: expect.stringMatching(/unique violation/),
+    });
+    await expect(chunkAndEmbed(DOC_A, TENANT_A, "some real text here")).rejects.toMatchObject({
+      message: expect.stringMatching(/delete blocked by FK/),
+    });
   });
 });

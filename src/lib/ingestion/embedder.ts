@@ -105,9 +105,15 @@ class OllamaEmbedder implements Embedder {
       throw new Error(`Ollama embeddings request failed (${res.status}): ${body}`);
     }
 
-    const data = (await res.json()) as { embeddings: number[][] };
-    assertEmbeddingDimensions(data.embeddings);
-    return data.embeddings;
+    const data = (await res.json()) as { embeddings?: unknown };
+    if (!Array.isArray(data.embeddings)) {
+      throw new Error(
+        `Ollama embeddings response is missing an \`embeddings\` array (got: ${JSON.stringify(data)})`,
+      );
+    }
+    const embeddings = data.embeddings as number[][];
+    assertEmbeddingDimensions(embeddings);
+    return embeddings;
   }
 }
 
