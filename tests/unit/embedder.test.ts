@@ -52,3 +52,72 @@ describe("createEmbedder — fake/mock selection", () => {
     expect(createEmbedder().modelVersion).toBe("mock");
   });
 });
+
+describe("createEmbedder — real Ollama selection", () => {
+  it("calls POST {OLLAMA_EMBED_URL}/api/embed with {model, input} and returns the embeddings", async () => {
+    vi.stubEnv("INFERENCE_PROVIDER", "ollama");
+    vi.stubEnv("OLLAMA_EMBED_URL", "http://test-ollama:11434");
+    vi.stubEnv("EMBEDDING_MODEL", "nomic-embed-text");
+
+    const fetchMock = vi.fn(async () =>
+      new Response(
+        JSON.stringify({ embeddings: [new Array(768).fill(0.1), new Array(768).fill(0.2)] }),
+        { status: 200 },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const embedder = createEmbedder();
+    expect(embedder.modelVersion).toBe("nomic-embed-text");
+
+    const result = await embedder.embed(["chunk one", "chunk two"]);
+
+    expect(fetchMock).toHaveBeenCalledExactlyOnceWith(
+      "http://test-ollama:11434/api/embed",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ model: "nomic-embed-text", input: ["chunk one", "chunk two"] }),
+      }),
+    );
+    expect(result).toHaveLength(2);
+    expect(result[0]).toHaveLength(768);
+  });
+
+  it("throws when Ollama returns a non-OK response", async () => {
+    vi.stubEnv("INFERENCE_PROVIDER", "ollama");
+    vi.stubEnv("OLLAMA_EMBED_URL", "http://test-ollama:11434");
+    vi.stubEnv("EMBEDDING_MODEL", "does-not-exist");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(JSON.stringify({ error: "model not found" }), { status: 404 })),
+    );
+
+    const embedder = createEmbedder();
+    await expect(embedder.embed(["hi"])).rejects.toThrow(/404/);
+  });
+
+  it("throws EmbeddingDimensionError when Ollama returns the wrong dimension", async () => {
+    vi.stubEnv("INFERENCE_PROVIDER", "ollama");
+    vi.stubEnv("OLLAMA_EMBED_URL", "http://test-ollama:11434");
+    vi.stubEnv("EMBEDDING_MODEL", "nomic-embed-text");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(JSON.stringify({ embeddings: [[1, 2, 3]] }), { status: 200 })),
+    );
+
+    const embedder = createEmbedder();
+    await expect(embedder.embed(["hi"])).rejects.toThrow(EmbeddingDimensionError);
+  });
+
+  it("returns an empty array without calling fetch for an empty input array", async () => {
+    vi.stubEnv("INFERENCE_PROVIDER", "ollama");
+    vi.stubEnv("OLLAMA_EMBED_URL", "http://test-ollama:11434");
+    vi.stubEnv("EMBEDDING_MODEL", "nomic-embed-text");
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const embedder = createEmbedder();
+    expect(await embedder.embed([])).toEqual([]);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});

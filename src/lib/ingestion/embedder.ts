@@ -78,8 +78,39 @@ export function createEmbedder(): Embedder {
   return createOllamaEmbedder();
 }
 
-// Placeholder swapped for the real implementation in Task B3 — DO NOT leave this
-// as-is; Task B3 replaces this function body entirely.
+function requireEnv(name: "OLLAMA_EMBED_URL" | "EMBEDDING_MODEL"): string {
+  const value = process.env[name];
+  if (!value) {
+    throw new Error(`Missing required environment variable: ${name}`);
+  }
+  return value;
+}
+
+class OllamaEmbedder implements Embedder {
+  constructor(
+    private readonly baseUrl: string,
+    readonly modelVersion: string,
+  ) {}
+
+  async embed(texts: string[]): Promise<number[][]> {
+    if (texts.length === 0) return [];
+
+    const res = await fetch(`${this.baseUrl}/api/embed`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: this.modelVersion, input: texts }),
+    });
+    if (!res.ok) {
+      const body = await res.text();
+      throw new Error(`Ollama embeddings request failed (${res.status}): ${body}`);
+    }
+
+    const data = (await res.json()) as { embeddings: number[][] };
+    assertEmbeddingDimensions(data.embeddings);
+    return data.embeddings;
+  }
+}
+
 function createOllamaEmbedder(): Embedder {
-  throw new Error("Ollama embedder not implemented yet (see Task B3)");
+  return new OllamaEmbedder(requireEnv("OLLAMA_EMBED_URL"), requireEnv("EMBEDDING_MODEL"));
 }
