@@ -3,7 +3,7 @@ import { EmbeddingDimensionError } from "@/lib/ingestion/embedder";
 import { DocumentParseError } from "@/lib/parsing/errors";
 import { parse } from "@/lib/parsing/parse";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
-import type { FileType } from "@/lib/documents/validation";
+import { isFileType } from "@/lib/documents/validation";
 
 /**
  * The document-ingestion background worker (issue #26).
@@ -30,22 +30,26 @@ import type { FileType } from "@/lib/documents/validation";
  * best-effort: the worker never throws out of its own body (a detached rejection
  * has nowhere to go), so a failure to even record the error is logged, not raised.
  *
- * A missing document row (e.g. deleted between upload and this running) is logged
- * and ignored — there is nothing to mark.
+ * A genuinely missing row (e.g. deleted between upload and this running) is logged and
+ * ignored — there is nothing to mark. A *read failure* of an existing row is different:
+ * it is marked `error` best-effort so the document doesn't sit at `processing` forever.
  */
 export async function ingestDocument(documentId: string): Promise<void> {
   const admin = createSupabaseAdminClient();
 
   const { data: doc, error: loadError } = await admin
     .from("documents")
-    .select("tenant_id, file_type, storage_path, status")
+    .select("tenant_id, file_type, storage_path")
     .eq("id", documentId)
     .maybeSingle();
 
   if (loadError) {
-    console.error(
-      `[ingestion] failed to load document ${documentId}: ${loadError.message}`,
-    );
+    // The row exists (the upload route just inserted it at `processing`) but the read
+    // failed — distinct from "not found". Without marking it the document would sit at
+    // `processing` forever with no signal, so best-effort flip it to `error`. We have no
+    // tenant_id here (the load failed), so this update is scoped by id only.
+    console.error(`[ingestion] failed to load document ${documentId}: ${loadError.message}`);
+    await markErrorBestEffort(admin, documentId, undefined, `load_failed: ${loadError.message}`);
     return;
   }
   if (!doc) {
@@ -58,43 +62,72 @@ export async function ingestDocument(documentId: string): Promise<void> {
   try {
     // Mark processing and clear any prior error_detail. Covers re-ingestion: a
     // document that was `ready` or `error` is moved back to `processing` for this run.
-    await updateStatus(admin, documentId, { status: "processing", error_detail: null });
+    await updateStatus(admin, documentId, tenantId, { status: "processing", error_detail: null });
 
     const blob = await downloadBytes(admin, doc.storage_path);
     const buffer = Buffer.from(await blob.arrayBuffer());
 
-    const { text } = await parse(buffer, doc.file_type as FileType);
+    // Defense-in-depth: file_type is a plain text column (the upload path only ever
+    // writes the four valid types), so narrow it before the parser's exhaustive switch
+    // rather than blind-casting an unknown value through it.
+    const fileType = doc.file_type;
+    if (!isFileType(fileType)) {
+      throw new Error(`unsupported_file_type: '${fileType}'`);
+    }
+
+    const { text } = await parse(buffer, fileType);
     await chunkAndEmbed(documentId, tenantId, text);
 
-    await updateStatus(admin, documentId, { status: "ready", error_detail: null });
+    await updateStatus(admin, documentId, tenantId, { status: "ready", error_detail: null });
   } catch (err) {
     const detail = describeFailure(err);
-    console.error(
-      `[ingestion] document ${documentId} (tenant ${tenantId}) failed: ${detail}`,
-    );
-    // Best-effort: record the failure durably for the admin dashboard. Never rethrow —
-    // the worker is detached, so an escaping rejection would be an unhandled rejection.
-    try {
-      await updateStatus(admin, documentId, { status: "error", error_detail: detail });
-    } catch (markErr) {
-      console.error(
-        `[ingestion] document ${documentId}: also failed to mark status=error: ${String(markErr)}`,
-      );
-    }
+    console.error(`[ingestion] document ${documentId} (tenant ${tenantId}) failed: ${detail}`);
+    await markErrorBestEffort(admin, documentId, tenantId, detail);
   }
 }
 
 type AdminClient = ReturnType<typeof createSupabaseAdminClient>;
 
-/** Update a document's status (+ error_detail). Throws on a DB error so callers can react. */
+/**
+ * Update a document's status (+ error_detail). Throws on a DB error so callers can react.
+ * Scoped by tenant_id as well as id when known — the admin client bypasses RLS, so the
+ * tenant filter is the backstop that keeps a write pinned to the document's own tenant
+ * (the repo's "DB-as-backstop-for-service_role-writes" convention). `tenantId` is
+ * `undefined` only on the load-error path, where the row couldn't be read to learn it.
+ */
 async function updateStatus(
   admin: AdminClient,
   documentId: string,
+  tenantId: string | undefined,
   patch: { status: "processing" | "ready" | "error"; error_detail: string | null },
 ): Promise<void> {
-  const { error } = await admin.from("documents").update(patch).eq("id", documentId);
+  let query = admin.from("documents").update(patch).eq("id", documentId);
+  if (tenantId !== undefined) {
+    query = query.eq("tenant_id", tenantId);
+  }
+  const { error } = await query;
   if (error) {
     throw new Error(`status update to '${patch.status}' failed: ${error.message}`);
+  }
+}
+
+/**
+ * Record status='error' + detail without letting a secondary failure escape. The worker
+ * is detached (fire-and-forget), so an escaping rejection would be an unhandled rejection;
+ * if even this update fails there is nowhere left to surface it but the log.
+ */
+async function markErrorBestEffort(
+  admin: AdminClient,
+  documentId: string,
+  tenantId: string | undefined,
+  detail: string,
+): Promise<void> {
+  try {
+    await updateStatus(admin, documentId, tenantId, { status: "error", error_detail: detail });
+  } catch (markErr) {
+    console.error(
+      `[ingestion] document ${documentId}: also failed to mark status=error: ${String(markErr)}`,
+    );
   }
 }
 
@@ -110,9 +143,9 @@ async function downloadBytes(admin: AdminClient, storagePath: string): Promise<B
 }
 
 /**
- * A concise, durable failure message. For the pipeline's typed errors the `code`
- * is prefixed so the admin dashboard can show a stable reason (e.g. `corrupt_file`,
- * `no_chunks`) rather than only free text.
+ * A concise, durable failure message. Every typed pipeline error carries a stable
+ * `code` (e.g. `corrupt_file`, `no_chunks`, `dimension_mismatch`), prefixed here so the
+ * admin dashboard can show a stable reason rather than only free text.
  */
 function describeFailure(err: unknown): string {
   if (
@@ -120,8 +153,7 @@ function describeFailure(err: unknown): string {
     err instanceof IngestionError ||
     err instanceof EmbeddingDimensionError
   ) {
-    const code = "code" in err ? err.code : err.name;
-    return `${code}: ${err.message}`;
+    return `${err.code}: ${err.message}`;
   }
   if (err instanceof Error) {
     return err.message;

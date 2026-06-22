@@ -3,6 +3,7 @@ import { ingestDocument } from "@/lib/ingestion/ingest-document";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import { parse } from "@/lib/parsing/parse";
 import { DocumentParseError } from "@/lib/parsing/errors";
+import { EmbeddingDimensionError } from "@/lib/ingestion/embedder";
 import { chunkAndEmbed } from "@/lib/ingestion/chunk-and-embed";
 import type { TypedSupabaseClient } from "@/lib/supabase/server";
 
@@ -13,8 +14,10 @@ import type { TypedSupabaseClient } from "@/lib/supabase/server";
  * the worker's orchestration + status transitions are tested in isolation:
  *   - happy path: status `processing` → `ready`, and download/parse are called
  *     with the loaded row's storage_path / file_type;
- *   - parse failure → status `error` + error_detail carrying the parse code;
- *   - chunkAndEmbed failure → status `error`;
+ *   - parse / download / chunkAndEmbed / dimension / unsupported-type failures →
+ *     status `error` + a code-prefixed error_detail, written after `processing`;
+ *   - status updates are tenant-scoped (id + tenant_id) on the happy path;
+ *   - a row *read* failure → best-effort `error` (id-scoped, no tenant known);
  *   - document not found → no throw, no status write.
  *
  * The atomic re-ingest RPC and the schema are proven against a real pgvector DB
@@ -58,12 +61,24 @@ function mockAdmin(opts: MockOpts = {}) {
   const selectEq = vi.fn(() => ({ maybeSingle }));
   const select = vi.fn(() => ({ eq: selectEq }));
 
-  // Records every update patch so transitions can be asserted in order.
+  // Records every update patch (in order) and the .eq() filters applied to each. The
+  // builder is thenable and its .eq() returns itself, so it supports the worker's
+  // chained `.update(patch).eq("id", …).eq("tenant_id", …)`.
   const updatePatches: Array<Record<string, unknown>> = [];
-  const updateEq = vi.fn(async () => ({ error: opts.updateError ?? null }));
+  const updateEqCalls: Array<[string, unknown]> = [];
+  const updateResult = { error: opts.updateError ?? null };
+  const updateBuilder: Record<string, unknown> = {
+    eq: vi.fn((col: string, val: unknown) => {
+      updateEqCalls.push([col, val]);
+      return updateBuilder;
+    }),
+    then: (onFulfilled: (v: typeof updateResult) => unknown, onRejected?: (e: unknown) => unknown) =>
+      Promise.resolve(updateResult).then(onFulfilled, onRejected),
+  };
+  const updateEq = updateBuilder.eq as ReturnType<typeof vi.fn>;
   const update = vi.fn((patch: Record<string, unknown>) => {
     updatePatches.push(patch);
-    return { eq: updateEq };
+    return updateBuilder;
   });
 
   const from = vi.fn((table: string) => {
@@ -79,7 +94,17 @@ function mockAdmin(opts: MockOpts = {}) {
 
   const client = { from, storage: { from: storageFrom } } as unknown as TypedSupabaseClient;
   vi.mocked(createSupabaseAdminClient).mockReturnValue(client);
-  return { from, select, selectEq, update, updateEq, updatePatches, download, storageFrom };
+  return {
+    from,
+    select,
+    selectEq,
+    update,
+    updateEq,
+    updateEqCalls,
+    updatePatches,
+    download,
+    storageFrom,
+  };
 }
 
 beforeEach(() => {
@@ -109,6 +134,13 @@ describe("ingestDocument", () => {
     // First update flips to processing (clearing error_detail); last marks ready.
     expect(admin.updatePatches[0]).toEqual({ status: "processing", error_detail: null });
     expect(admin.updatePatches.at(-1)).toEqual({ status: "ready", error_detail: null });
+
+    // Every status update is scoped by both id and the row's tenant_id (the admin
+    // client bypasses RLS, so the tenant filter is the backstop).
+    for (const [, val] of admin.updateEqCalls.filter(([col]) => col === "tenant_id")) {
+      expect(val).toBe(TENANT_A);
+    }
+    expect(admin.updateEqCalls.some(([col]) => col === "tenant_id")).toBe(true);
   });
 
   it("marks status=error with the parse code in error_detail when parsing fails", async () => {
@@ -135,6 +167,59 @@ describe("ingestDocument", () => {
     const last = admin.updatePatches.at(-1) as { status: string; error_detail: string };
     expect(last.status).toBe("error");
     expect(last.error_detail).toContain("ollama unreachable");
+  });
+
+  it("writes processing BEFORE error on a failure (not just error last)", async () => {
+    // Guards against a regression that skips the opening `processing` write — which is
+    // also what clears a previously-failed document's stale error_detail on re-ingest.
+    const admin = mockAdmin();
+    vi.mocked(chunkAndEmbed).mockRejectedValue(new Error("boom"));
+
+    await ingestDocument(DOC_A);
+
+    expect(admin.updatePatches[0]).toEqual({ status: "processing", error_detail: null });
+    expect((admin.updatePatches.at(-1) as { status: string }).status).toBe("error");
+  });
+
+  it("marks status=error with the dimension_mismatch code when embedding dims are wrong", async () => {
+    const admin = mockAdmin();
+    vi.mocked(chunkAndEmbed).mockRejectedValue(
+      new EmbeddingDimensionError("Expected 768-dim embedding, got 4"),
+    );
+
+    await ingestDocument(DOC_A);
+
+    const last = admin.updatePatches.at(-1) as { status: string; error_detail: string };
+    expect(last.status).toBe("error");
+    expect(last.error_detail).toContain("dimension_mismatch");
+  });
+
+  it("marks status=error for an unsupported file_type without downloading-then-parsing it", async () => {
+    const admin = mockAdmin({
+      row: { tenant_id: TENANT_A, file_type: "csv", storage_path: STORAGE_PATH },
+    });
+
+    await ingestDocument(DOC_A);
+
+    expect(parse).not.toHaveBeenCalled();
+    const last = admin.updatePatches.at(-1) as { status: string; error_detail: string };
+    expect(last.status).toBe("error");
+    expect(last.error_detail).toContain("unsupported_file_type");
+  });
+
+  it("marks status=error (id-scoped) when the row read itself fails", async () => {
+    // A read failure is distinct from not-found: the row exists, so leaving it at
+    // `processing` forever is wrong — the worker best-effort flips it to `error`.
+    const admin = mockAdmin({ loadError: { message: "connection reset" } });
+
+    await ingestDocument(DOC_A);
+
+    expect(admin.download).not.toHaveBeenCalled();
+    const last = admin.updatePatches.at(-1) as { status: string; error_detail: string };
+    expect(last.status).toBe("error");
+    expect(last.error_detail).toContain("load_failed");
+    // No tenant_id is known on this path, so the update is scoped by id only.
+    expect(admin.updateEqCalls.some(([col]) => col === "tenant_id")).toBe(false);
   });
 
   it("marks status=error when the storage download fails", async () => {
