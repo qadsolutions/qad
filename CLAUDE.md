@@ -112,6 +112,25 @@ docker exec qad-ollama ollama pull llama3.2
 docker exec qad-ollama ollama list
 ```
 
+### Run integration tests locally (pgvector DB)
+
+Integration suites connect to `DATABASE_URL` and need Postgres **with pgvector** (the
+embeddings migration runs `CREATE EXTENSION vector`). The dev Postgres on `:5433` is
+alpine without it, so a dedicated test DB on `:5544` mirrors CI's `pgvector/pgvector:pg16`.
+
+**Just run the tests — setup is automatic:**
+
+```bash
+pnpm test
+```
+
+A `pretest` hook (`scripts/ensure-test-db.mjs`) writes a gitignored `.env.test.local`
+(auto-loaded by `vitest.config.ts`) and starts the `qad-test-db` container if needed —
+no manual steps. It's best-effort and never fails the run; if Docker is down it warns and
+unit tests still run. CI sets its own `DATABASE_URL` and runs `vitest` directly, so the
+hook is a no-op there. To start the DB by hand:
+`docker compose --profile test up -d qad-test-db`.
+
 ### Local service endpoints
 
 | Service | URL | Credentials |
