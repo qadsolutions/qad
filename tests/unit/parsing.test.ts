@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { DocumentParseError } from "@/lib/parsing/errors";
 import { parseDocx } from "@/lib/parsing/docx";
+import { parse } from "@/lib/parsing/parse";
 import { parsePdf } from "@/lib/parsing/pdf";
 import { parseText } from "@/lib/parsing/text";
 
@@ -51,6 +52,35 @@ describe("parseDocx", () => {
     const buffer = Buffer.from("not a real docx file at all");
     await expect(parseDocx(buffer)).rejects.toMatchObject({
       code: "corrupt_file",
+    });
+  });
+});
+
+describe("parse (dispatcher)", () => {
+  it("routes pdf to parsePdf and trims trailing whitespace", async () => {
+    const buffer = readFileSync("tests/fixtures/sample.pdf");
+    const result = await parse(buffer, "pdf");
+    expect(result.text).toBe("Hello World");
+  });
+
+  it("routes docx to parseDocx and trims mammoth's trailing newlines", async () => {
+    const buffer = readFileSync("tests/fixtures/sample.docx");
+    const result = await parse(buffer, "docx");
+    expect(result.text).toBe("Hello World");
+  });
+
+  it("routes txt/md to parseText", async () => {
+    const buffer = Buffer.from("plain text content", "utf-8");
+    expect((await parse(buffer, "txt")).text).toBe("plain text content");
+    expect((await parse(buffer, "md")).text).toBe("plain text content");
+  });
+
+  it("throws DocumentParseError(empty_text) when extracted text is empty or whitespace-only", async () => {
+    await expect(parse(Buffer.from("   \n  ", "utf-8"), "txt")).rejects.toMatchObject({
+      code: "empty_text",
+    });
+    await expect(parse(Buffer.from("", "utf-8"), "txt")).rejects.toMatchObject({
+      code: "empty_text",
     });
   });
 });
