@@ -20,11 +20,18 @@ export async function parsePdf(buffer: Buffer): Promise<string> {
     throw new DocumentParseError("corrupt_file", `Failed to open PDF: ${(err as Error).message}`);
   }
 
-  const pageTexts: string[] = [];
-  for (let i = 1; i <= doc.numPages; i++) {
-    const page = await doc.getPage(i);
-    const content = await page.getTextContent();
-    pageTexts.push(content.items.map((item) => ("str" in item ? item.str : "")).join(" "));
+  try {
+    const pageTexts: string[] = [];
+    for (let i = 1; i <= doc.numPages; i++) {
+      const page = await doc.getPage(i);
+      const content = await page.getTextContent();
+      pageTexts.push(content.items.map((item) => ("str" in item ? item.str : "")).join(" "));
+    }
+    return pageTexts.join("\n");
+  } catch (err) {
+    throw new DocumentParseError(
+      "corrupt_file",
+      `Failed to read PDF page: ${(err as Error).message}`,
+    );
   }
-  return pageTexts.join("\n");
 }
