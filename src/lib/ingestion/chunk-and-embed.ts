@@ -2,7 +2,7 @@ import { chunkText } from "@/lib/ingestion/chunking";
 import { assertEmbeddingDimensions, createEmbedder } from "@/lib/ingestion/embedder";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 
-export type IngestionErrorCode = "no_chunks" | "chunk_insert_failed" | "embedding_insert_failed";
+export type IngestionErrorCode = "no_chunks" | "persist_failed";
 
 export class IngestionError extends Error {
   constructor(
@@ -20,19 +20,26 @@ function toVectorLiteral(values: readonly number[]): string {
 }
 
 /**
- * Chunk `text`, embed each chunk, and bulk-insert `document_chunks` + `embeddings`
- * rows, every row scoped to `tenantId` (issue #25).
+ * Chunk `text`, embed each chunk, and persist the `document_chunks` + `embeddings`
+ * rows for `documentId`, every row scoped to `tenantId` (issues #25, #26).
  *
- * `tenantId` is always passed in by the caller (the future worker, #26, which
- * already has it from the `documents` row) — never re-derived here, matching
- * the tenant-scoping convention #23 established.
+ * `tenantId` is always passed in by the caller (the worker, #26, which already
+ * has it from the `documents` row) — never re-derived here, matching the
+ * tenant-scoping convention #23 established.
  *
  * Embedding runs before any DB write, so the most common failure (Ollama
- * unreachable) never touches the database. If the embeddings insert fails after
- * the chunks insert already succeeded, the just-inserted chunks are deleted so a
- * failure never leaves orphaned chunks with no vectors — that cleanup is
- * best-effort, so if it also fails, the cleanup error is folded into the thrown
- * message rather than silently dropped (#26's re-ingestion is the real backstop).
+ * unreachable) never touches the database.
+ *
+ * Persistence goes through the `reingest_document_chunks` RPC, not two separate
+ * `.insert()` calls (decision D1, docs/m3-plan.md). supabase-js can't run a
+ * multi-statement transaction over PostgREST, so the atomic "delete all old
+ * chunks/embeddings for this document, then insert the new set" is a single
+ * plpgsql function whose body is one implicit transaction. That makes first
+ * ingest and re-ingest the SAME path — the delete is a no-op on first ingest —
+ * and means a mid-failure rolls back to the prior good state rather than leaving
+ * the document half-wiped (the manual compensating-delete this function replaced
+ * could not guarantee that). The chunk ids are generated here so each chunk and
+ * its vector travel together in one payload element and can never be mispaired.
  */
 export async function chunkAndEmbed(
   documentId: string,
@@ -54,44 +61,25 @@ export async function chunkAndEmbed(
 
   const supabase = createSupabaseAdminClient();
 
-  const chunkRows = textChunks.map((chunk) => ({
+  // One payload element per chunk, carrying both the chunk columns and its vector
+  // literal under a single generated id — the shape reingest_document_chunks reads.
+  const chunks = textChunks.map((chunk, i) => ({
     id: crypto.randomUUID(),
-    document_id: documentId,
-    tenant_id: tenantId,
     chunk_text: chunk.text,
     chunk_index: chunk.index,
     token_count: chunk.tokenCount,
-  }));
-
-  const { error: chunksError } = await supabase.from("document_chunks").insert(chunkRows);
-  if (chunksError) {
-    throw new IngestionError("chunk_insert_failed", chunksError.message);
-  }
-
-  const embeddingRows = chunkRows.map((chunk, i) => ({
-    chunk_id: chunk.id,
-    tenant_id: tenantId,
     embedding: toVectorLiteral(vectors[i]),
-    model_version: embedder.modelVersion,
   }));
 
-  const { error: embeddingsError } = await supabase.from("embeddings").insert(embeddingRows);
-  if (embeddingsError) {
-    const { error: cleanupError } = await supabase
-      .from("document_chunks")
-      .delete()
-      .in(
-        "id",
-        chunkRows.map((chunk) => chunk.id),
-      );
-    // Cleanup is best-effort, but a failure here means the just-inserted chunks are now
-    // orphaned (no vectors) — surface that in the thrown message rather than dropping it,
-    // since #26's re-ingestion is the real backstop and needs to know cleanup didn't land.
-    const message = cleanupError
-      ? `${embeddingsError.message} (cleanup of inserted chunks also failed, they may be orphaned: ${cleanupError.message})`
-      : embeddingsError.message;
-    throw new IngestionError("embedding_insert_failed", message);
+  const { error } = await supabase.rpc("reingest_document_chunks", {
+    p_document_id: documentId,
+    p_tenant_id: tenantId,
+    p_chunks: chunks,
+    p_model_version: embedder.modelVersion,
+  });
+  if (error) {
+    throw new IngestionError("persist_failed", error.message);
   }
 
-  return { chunkCount: chunkRows.length };
+  return { chunkCount: chunks.length };
 }

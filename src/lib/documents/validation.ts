@@ -34,6 +34,17 @@ const CONTENT_TYPE_BY_FILE_TYPE: Record<FileType, string> = {
   md: "text/markdown",
 };
 
+/**
+ * Narrow an arbitrary string (e.g. the `documents.file_type` text column, which the
+ * generated DB types only know as `string`) to the canonical `FileType` union. The
+ * upload path only ever writes one of these four values, so this is defense-in-depth:
+ * it lets the worker fail a row with an unexpected `file_type` cleanly instead of
+ * passing an unchecked cast into the parser's exhaustive switch.
+ */
+export function isFileType(value: string): value is FileType {
+  return Object.hasOwn(ALLOWED_EXTENSIONS, value);
+}
+
 /** Resolve the canonical `file_type` from a filename, or null if the extension isn't allowed. */
 export function resolveFileType(filename: string): FileType | null {
   const dot = filename.lastIndexOf(".");

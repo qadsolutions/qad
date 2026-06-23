@@ -162,6 +162,7 @@ export type Database = {
       documents: {
         Row: {
           created_at: string
+          error_detail: string | null
           file_type: string
           filename: string
           id: string
@@ -172,6 +173,7 @@ export type Database = {
         }
         Insert: {
           created_at?: string
+          error_detail?: string | null
           file_type: string
           filename: string
           id?: string
@@ -182,6 +184,7 @@ export type Database = {
         }
         Update: {
           created_at?: string
+          error_detail?: string | null
           file_type?: string
           filename?: string
           id?: string
@@ -484,6 +487,15 @@ export type Database = {
     }
     Functions: {
       custom_access_token_hook: { Args: { event: Json }; Returns: Json }
+      reingest_document_chunks: {
+        Args: {
+          p_chunks: Json
+          p_document_id: string
+          p_model_version: string
+          p_tenant_id: string
+        }
+        Returns: number
+      }
     }
     Enums: {
       [_ in never]: never

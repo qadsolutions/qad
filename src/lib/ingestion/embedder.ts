@@ -4,6 +4,10 @@ import { createHash } from "node:crypto";
 export const EMBEDDING_DIM = 768;
 
 export class EmbeddingDimensionError extends Error {
+  /** Stable reason slug, mirroring DocumentParseError/IngestionError so the worker's
+   * error_detail (and the M7 dashboard) keys off a code, not a class name. */
+  readonly code = "dimension_mismatch";
+
   constructor(message: string) {
     super(message);
     this.name = "EmbeddingDimensionError";
