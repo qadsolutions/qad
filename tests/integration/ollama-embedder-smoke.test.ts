@@ -3,6 +3,7 @@ import { createEmbedder, EMBEDDING_DIM } from "@/lib/ingestion/embedder";
 
 async function isOllamaReachable(baseUrl: string): Promise<boolean> {
   try {
+    // 5s: tolerates a loaded dev machine taking longer to answer /api/tags
     const res = await fetch(`${baseUrl}/api/tags`, { signal: AbortSignal.timeout(5000) });
     return res.ok;
   } catch {
