@@ -6,6 +6,8 @@ import { bootstrapTestDatabase } from "../helpers/setup-test-db";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import { ingestDocument } from "@/lib/ingestion/ingest-document";
 import type { Embedder } from "@/lib/ingestion/embedder";
+import type { Database } from "@/lib/supabase/database.types";
+import type { TypedSupabaseClient } from "@/lib/supabase/server";
 
 /**
  * End-to-end integration coverage for the real ingestion worker (issue #27),
@@ -86,15 +88,18 @@ afterEach(() => {
 // ingestDocument()/chunkAndEmbed() make into real SQL against `sql`.
 // ---------------------------------------------------------------------------
 
-interface DocumentsPatch {
-  status: "processing" | "ready" | "error";
-  error_detail: string | null;
-}
+// Anchor the double's data shapes to the schema-generated source of truth, so a real
+// column rename / type change (or RPC signature change) breaks compilation here instead
+// of drifting silently. When PR #95 regenerates database.types.ts with the real status
+// enum, `status` below automatically tightens from `string` to the literal union — no
+// further change needed here.
+type DocumentsPatch = Required<
+  Pick<Database["public"]["Tables"]["documents"]["Update"], "status" | "error_detail">
+>;
 
-/** The exact payload shape chunkAndEmbed() passes to .rpc("reingest_document_chunks", ...). */
-interface ReingestArgs {
-  p_document_id: string;
-  p_tenant_id: string;
+/** Extends the real generated RPC arg type, keeping a stricter `p_chunks` element shape. */
+type RealReingestArgs = Database["public"]["Functions"]["reingest_document_chunks"]["Args"];
+interface ReingestArgs extends Omit<RealReingestArgs, "p_chunks"> {
   p_chunks: ReadonlyArray<{
     id: string;
     chunk_text: string;
@@ -102,7 +107,31 @@ interface ReingestArgs {
     token_count: number;
     embedding: string;
   }>;
-  p_model_version: string;
+}
+
+/**
+ * Faithfully reproduce the parts of a real Supabase `PostgrestError` callers may branch
+ * on. The `postgres` npm driver's thrown errors carry `.code`, `.detail` (singular),
+ * `.hint` when available; map them into PostgrestError's `{message, details, hint, code}`
+ * shape so the double's error object is realistic for any future caller. Production code
+ * (ingest-document.ts / chunk-and-embed.ts) only reads `.message` today.
+ */
+function toPostgrestErrorShape(err: unknown): {
+  message: string;
+  details: string | null;
+  hint: string | null;
+  code: string | null;
+} {
+  if (err instanceof Error) {
+    const pgErr = err as Error & { detail?: string; hint?: string; code?: string };
+    return {
+      message: pgErr.message,
+      details: pgErr.detail ?? null,
+      hint: pgErr.hint ?? null,
+      code: pgErr.code ?? null,
+    };
+  }
+  return { message: String(err), details: null, hint: null, code: null };
 }
 
 /** Bytes the double's fake Storage download() resolves to, keyed by document id. */
@@ -122,11 +151,19 @@ function createByteStore() {
  * Build an admin-client double backed by the real `sql` connection, implementing
  * only what `ingestDocument()` + `chunkAndEmbed()` call:
  *   - from("documents").select(cols).eq("id", id).maybeSingle()
- *   - from("documents").update(patch).eq("id", id)[.eq("tenant_id", id)]
+ *   - from("documents").update(patch).eq("id", id).eq("tenant_id", id)
  *   - storage.from("documents").download(path)  (faked via byteStore, path ignored)
  *   - rpc("reingest_document_chunks", args)
+ *
+ * `opts.forceUpdateError` makes every update() call resolve with a DB error (without
+ * touching `sql`), so tests can exercise the worker's write-failure branches.
  */
-function createAdminDouble(byteStore: ReturnType<typeof createByteStore>, documentId: string) {
+function createAdminDouble(
+  byteStore: ReturnType<typeof createByteStore>,
+  documentId: string,
+  opts: { forceUpdateError?: boolean } = {},
+) {
+  const forceUpdateError = opts.forceUpdateError ?? false;
   const from = vi.fn((table: string) => {
     if (table !== "documents") throw new Error(`admin double: unexpected table ${table}`);
 
@@ -147,6 +184,9 @@ function createAdminDouble(byteStore: ReturnType<typeof createByteStore>, docume
       const filters: Array<[string, string]> = [];
       const builder = {
         eq(col: string, val: string) {
+          if (col !== "id" && col !== "tenant_id") {
+            throw new Error(`admin double: update() got unsupported filter column '${col}'`);
+          }
           filters.push([col, val]);
           return builder;
         },
@@ -161,23 +201,27 @@ function createAdminDouble(byteStore: ReturnType<typeof createByteStore>, docume
         const idFilter = filters.find(([col]) => col === "id");
         const tenantFilter = filters.find(([col]) => col === "tenant_id");
         if (!idFilter) throw new Error("admin double: update() requires an id filter");
+        if (!tenantFilter) {
+          throw new Error(
+            "admin double: update() was called without a tenant_id filter — " +
+              "ingest-document.ts's updateStatus() must always scope writes by tenant_id " +
+              "once the document has loaded; if you're intentionally testing the documented " +
+              "load-error path (no tenantId available), extend this double to support it explicitly " +
+              "instead of silently falling back to an id-only write.",
+          );
+        }
+        if (forceUpdateError) {
+          return { error: { message: "simulated DB write failure (forceUpdateError)" } };
+        }
         try {
-          if (tenantFilter) {
-            await sql`
-              UPDATE public.documents
-              SET status = ${patch.status}, error_detail = ${patch.error_detail}
-              WHERE id = ${idFilter[1]} AND tenant_id = ${tenantFilter[1]}
-            `;
-          } else {
-            await sql`
-              UPDATE public.documents
-              SET status = ${patch.status}, error_detail = ${patch.error_detail}
-              WHERE id = ${idFilter[1]}
-            `;
-          }
+          await sql`
+            UPDATE public.documents
+            SET status = ${patch.status}, error_detail = ${patch.error_detail}
+            WHERE id = ${idFilter[1]} AND tenant_id = ${tenantFilter[1]}
+          `;
           return { error: null };
         } catch (err) {
-          return { error: { message: err instanceof Error ? err.message : String(err) } };
+          return { error: toPostgrestErrorShape(err) };
         }
       }
       return builder;
@@ -210,7 +254,7 @@ function createAdminDouble(byteStore: ReturnType<typeof createByteStore>, docume
       `;
       return { error: null };
     } catch (err) {
-      return { error: { message: err instanceof Error ? err.message : String(err) } };
+      return { error: toPostgrestErrorShape(err) };
     }
   });
 
@@ -274,6 +318,50 @@ async function countOrphanedEmbeddings(): Promise<number> {
   return rows[0].n as number;
 }
 
+// ---------------------------------------------------------------------------
+// Per-case setup helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Generate a document id, insert a `processing` row, build the byte store + admin
+ * double, and wire the `createSupabaseAdminClient` mock — the boilerplate every case
+ * repeats. Pass `bytes` to seed the store at setup time; omit it (and seed later via
+ * the returned `byteStore`) for cases that need different content per ingest.
+ */
+async function setupIngestCase(opts: {
+  filename: string;
+  fileType: string;
+  bytes?: Buffer;
+  forceUpdateError?: boolean;
+}): Promise<{ documentId: string; byteStore: ReturnType<typeof createByteStore> }> {
+  const documentId = crypto.randomUUID();
+  await insertProcessingDocument({ id: documentId, filename: opts.filename, fileType: opts.fileType });
+  const byteStore = createByteStore();
+  if (opts.bytes) byteStore.seed(documentId, opts.bytes);
+  const admin = createAdminDouble(byteStore, documentId, { forceUpdateError: opts.forceUpdateError });
+  vi.mocked(createSupabaseAdminClient).mockReturnValue(admin as unknown as TypedSupabaseClient);
+  return { documentId, byteStore };
+}
+
+/**
+ * Re-import `ingestDocument` with `createEmbedder()` swapped for one whose `embed()` is
+ * the supplied implementation — the ~18-line `vi.doMock`/`vi.resetModules`/dynamic-import
+ * dance both AC3 partial-failure cases otherwise repeat.
+ */
+async function importIngestDocumentWithEmbedder(
+  embed: Embedder["embed"],
+): Promise<(typeof import("@/lib/ingestion/ingest-document"))["ingestDocument"]> {
+  vi.doMock("@/lib/ingestion/embedder", async () => {
+    const actual = await vi.importActual<typeof import("@/lib/ingestion/embedder")>(
+      "@/lib/ingestion/embedder",
+    );
+    return { ...actual, createEmbedder: (): Embedder => ({ modelVersion: "mock", embed }) };
+  });
+  vi.resetModules();
+  const { ingestDocument } = await import("@/lib/ingestion/ingest-document");
+  return ingestDocument;
+}
+
 const FIXTURES_DIR = resolve(process.cwd(), "tests/fixtures");
 
 describe("ingestDocument() end-to-end against a real pgvector DB (#27)", () => {
@@ -295,13 +383,7 @@ describe("ingestDocument() end-to-end against a real pgvector DB (#27)", () => {
     },
   ])("file type: $fileType", ({ fileType, filename, bytes }) => {
     it(`ingests a real .${fileType} fixture end-to-end: status ready, chunks + 768-dim embeddings persisted`, async () => {
-      const documentId = crypto.randomUUID();
-      await insertProcessingDocument({ id: documentId, filename, fileType });
-
-      const byteStore = createByteStore();
-      byteStore.seed(documentId, bytes());
-      const admin = createAdminDouble(byteStore, documentId);
-      vi.mocked(createSupabaseAdminClient).mockReturnValue(admin as never);
+      const { documentId } = await setupIngestCase({ filename, fileType, bytes: bytes() });
 
       await ingestDocument(documentId);
 
@@ -327,36 +409,19 @@ describe("ingestDocument() end-to-end against a real pgvector DB (#27)", () => {
   // -------------------------------------------------------------------------
   describe("partial failure recovery (AC3)", () => {
     it("a first-time ingest whose embedding step fails ends at status=error with zero chunks persisted", async () => {
-      const documentId = crypto.randomUUID();
-      await insertProcessingDocument({ id: documentId, filename: "fails.txt", fileType: "txt" });
-
-      const byteStore = createByteStore();
-      byteStore.seed(documentId, Buffer.from("Some real text content to chunk and embed.", "utf-8"));
-      const admin = createAdminDouble(byteStore, documentId);
-      vi.mocked(createSupabaseAdminClient).mockReturnValue(admin as never);
-
-      // Force the embed step to fail by making createEmbedder() return an embedder
-      // whose embed() rejects — this is the most common real-world failure mode
-      // (Ollama unreachable / request error), and chunkAndEmbed() never writes to
-      // the DB before this call succeeds (see chunk-and-embed.ts's header comment).
-      vi.doMock("@/lib/ingestion/embedder", async () => {
-        const actual =
-          await vi.importActual<typeof import("@/lib/ingestion/embedder")>(
-            "@/lib/ingestion/embedder",
-          );
-        return {
-          ...actual,
-          createEmbedder: (): Embedder => ({
-            modelVersion: "mock",
-            embed: async () => {
-              throw new Error("embedding backend unreachable (simulated)");
-            },
-          }),
-        };
+      const { documentId } = await setupIngestCase({
+        filename: "fails.txt",
+        fileType: "txt",
+        bytes: Buffer.from("Some real text content to chunk and embed.", "utf-8"),
       });
-      vi.resetModules();
-      const { ingestDocument: ingestDocumentWithFailingEmbedder } = await import(
-        "@/lib/ingestion/ingest-document"
+
+      // Force the embed step to fail — this is the most common real-world failure mode
+      // (Ollama unreachable / request error), and chunkAndEmbed() never writes to the DB
+      // before this call succeeds (see chunk-and-embed.ts's header comment).
+      const ingestDocumentWithFailingEmbedder = await importIngestDocumentWithEmbedder(
+        async () => {
+          throw new Error("embedding backend unreachable (simulated)");
+        },
       );
 
       await ingestDocumentWithFailingEmbedder(documentId);
@@ -373,32 +438,16 @@ describe("ingestDocument() end-to-end against a real pgvector DB (#27)", () => {
     });
 
     it("a wrong-dimension embedding also ends at status=error with zero chunks persisted", async () => {
-      const documentId = crypto.randomUUID();
-      await insertProcessingDocument({ id: documentId, filename: "baddim.txt", fileType: "txt" });
-
-      const byteStore = createByteStore();
-      byteStore.seed(documentId, Buffer.from("Text that will get a malformed embedding.", "utf-8"));
-      const admin = createAdminDouble(byteStore, documentId);
-      vi.mocked(createSupabaseAdminClient).mockReturnValue(admin as never);
-
-      vi.doMock("@/lib/ingestion/embedder", async () => {
-        const actual =
-          await vi.importActual<typeof import("@/lib/ingestion/embedder")>(
-            "@/lib/ingestion/embedder",
-          );
-        return {
-          ...actual,
-          createEmbedder: (): Embedder => ({
-            modelVersion: "mock",
-            // Wrong dimensionality — assertEmbeddingDimensions() inside
-            // chunkAndEmbed() throws before any DB write is attempted.
-            embed: async (texts: string[]) => texts.map(() => [0.1, 0.2, 0.3, 0.4]),
-          }),
-        };
+      const { documentId } = await setupIngestCase({
+        filename: "baddim.txt",
+        fileType: "txt",
+        bytes: Buffer.from("Text that will get a malformed embedding.", "utf-8"),
       });
-      vi.resetModules();
-      const { ingestDocument: ingestDocumentWithBadDims } = await import(
-        "@/lib/ingestion/ingest-document"
+
+      // Wrong dimensionality — assertEmbeddingDimensions() inside chunkAndEmbed() throws
+      // before any DB write is attempted.
+      const ingestDocumentWithBadDims = await importIngestDocumentWithEmbedder(
+        async (texts: string[]) => texts.map(() => [0.1, 0.2, 0.3, 0.4]),
       );
 
       await ingestDocumentWithBadDims(documentId);
@@ -417,12 +466,10 @@ describe("ingestDocument() end-to-end against a real pgvector DB (#27)", () => {
   // -------------------------------------------------------------------------
   describe("re-ingestion leaves no orphans (AC4)", () => {
     it("re-ingesting the same document replaces all chunks + embeddings with zero orphans", async () => {
-      const documentId = crypto.randomUUID();
-      await insertProcessingDocument({ id: documentId, filename: "versioned.txt", fileType: "txt" });
-
-      const byteStore = createByteStore();
-      const admin = createAdminDouble(byteStore, documentId);
-      vi.mocked(createSupabaseAdminClient).mockReturnValue(admin as never);
+      const { documentId, byteStore } = await setupIngestCase({
+        filename: "versioned.txt",
+        fileType: "txt",
+      });
 
       // First ingest.
       byteStore.seed(
@@ -466,12 +513,10 @@ describe("ingestDocument() end-to-end against a real pgvector DB (#27)", () => {
     });
 
     it("re-ingestion after a failed first attempt still lands cleanly with no leftover rows", async () => {
-      const documentId = crypto.randomUUID();
-      await insertProcessingDocument({ id: documentId, filename: "recover.txt", fileType: "txt" });
-
-      const byteStore = createByteStore();
-      const admin = createAdminDouble(byteStore, documentId);
-      vi.mocked(createSupabaseAdminClient).mockReturnValue(admin as never);
+      const { documentId, byteStore } = await setupIngestCase({
+        filename: "recover.txt",
+        fileType: "txt",
+      });
 
       // First attempt fails at parse time (empty text -> DocumentParseError).
       byteStore.seed(documentId, Buffer.from("   \n\t  ", "utf-8"));
@@ -489,6 +534,36 @@ describe("ingestDocument() end-to-end against a real pgvector DB (#27)", () => {
       expect(recoveredDoc.error_detail).toBeNull();
       expect((await getChunks(documentId)).length).toBeGreaterThan(0);
       expect(await countOrphanedEmbeddings()).toBe(0);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // DB write-failure handling: updateStatus()/markErrorBestEffort()'s error
+  // branches in ingest-document.ts, otherwise unexercised by this suite.
+  // -------------------------------------------------------------------------
+  describe("DB write failure handling", () => {
+    it("a DB write failure on every update() call is caught and logged, never escaping ingestDocument() as a rejection", async () => {
+      const { documentId } = await setupIngestCase({
+        filename: "dbfail.txt",
+        fileType: "txt",
+        bytes: Buffer.from("Real content that would parse and embed fine.", "utf-8"),
+        forceUpdateError: true,
+      });
+
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      await expect(ingestDocument(documentId)).resolves.toBeUndefined();
+
+      // updateStatus()'s first call (marking 'processing') fails -> caught by
+      // ingestDocument()'s try/catch -> markErrorBestEffort() tries to mark
+      // status='error' -> that update ALSO fails (every update() call fails here) ->
+      // markErrorBestEffort()'s own catch must log, not throw. This is the
+      // doubly-nested failure path that was previously completely untested.
+      expect(errorSpy).toHaveBeenCalledWith(
+        expect.stringContaining("also failed to mark status=error"),
+      );
+
+      errorSpy.mockRestore();
     });
   });
 });
