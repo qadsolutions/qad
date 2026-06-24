@@ -1,3 +1,5 @@
+import type { Database } from "@/lib/supabase/database.types";
+
 /**
  * Upload validation for the document ingestion pipeline (issue #23).
  *
@@ -13,18 +15,27 @@ export const MAX_FILE_SIZE_BYTES = 50 * 1024 * 1024;
 export const UPLOAD_FIELD_NAME = "file";
 
 /**
- * Allowed extension → canonical `file_type` stored on the `documents` row and later
- * switched on by the parsers (#24). Extension is the reliable signal across these
- * formats (a browser's MIME for .md/.txt is unreliable), so type is keyed off it.
+ * Canonical `file_type` stored on the `documents` row and later switched on by the
+ * parsers (#24). Derived from the generated `document_file_type` Postgres enum (#92)
+ * instead of a hand-declared union, so this type can never silently drift from the
+ * DB's allowed set — the schema is the single source of truth for the four values.
  */
-const ALLOWED_EXTENSIONS = {
+export type FileType = Database["public"]["Enums"]["document_file_type"];
+
+/**
+ * Allowed extension → canonical `FileType`. Extension is the reliable signal across
+ * these formats (a browser's MIME for .md/.txt is unreliable), so type is keyed off
+ * it. The extension→type mapping itself is NOT a DB concern (file extensions are
+ * never stored or constrained by the schema), so unlike `FileType` above this stays a
+ * local table — just typed against the DB-derived `FileType` so a typo here would be
+ * a compile error rather than a silently-accepted bogus value.
+ */
+const ALLOWED_EXTENSIONS: Record<string, FileType> = {
   pdf: "pdf",
   docx: "docx",
   txt: "txt",
   md: "md",
-} as const;
-
-export type FileType = (typeof ALLOWED_EXTENSIONS)[keyof typeof ALLOWED_EXTENSIONS];
+};
 
 /** Fallback content types for Storage when the browser sends none, keyed by file_type. */
 const CONTENT_TYPE_BY_FILE_TYPE: Record<FileType, string> = {
@@ -35,11 +46,12 @@ const CONTENT_TYPE_BY_FILE_TYPE: Record<FileType, string> = {
 };
 
 /**
- * Narrow an arbitrary string (e.g. the `documents.file_type` text column, which the
- * generated DB types only know as `string`) to the canonical `FileType` union. The
- * upload path only ever writes one of these four values, so this is defense-in-depth:
- * it lets the worker fail a row with an unexpected `file_type` cleanly instead of
- * passing an unchecked cast into the parser's exhaustive switch.
+ * Narrow an arbitrary string to the canonical `FileType` union. `documents.file_type`
+ * is now DB-enforced (the `document_file_type` Postgres enum, #92), so this guard is
+ * defense-in-depth rather than the only thing standing between a bad value and the
+ * parser: it lets the worker fail a row with an unexpected `file_type` cleanly instead
+ * of passing an unchecked cast into the parser's exhaustive switch (e.g. if a future
+ * out-of-band write or a not-yet-migrated row reaches this code path).
  */
 export function isFileType(value: string): value is FileType {
   return Object.hasOwn(ALLOWED_EXTENSIONS, value);
