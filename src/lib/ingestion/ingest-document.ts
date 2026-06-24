@@ -80,10 +80,8 @@ export async function ingestDocument(documentId: string): Promise<void> {
     const blob = await downloadBytes(admin, doc.storage_path);
     const buffer = Buffer.from(await blob.arrayBuffer());
 
-    // Defense-in-depth: file_type is DB-enforced (the document_file_type enum, #92),
-    // but isFileType() still narrows to FileType before the parser's exhaustive switch
-    // rather than blind-casting — see isFileType()'s doc comment for why this guard
-    // stays even though the DB now constrains the value too.
+    // file_type is DB-enforced (document_file_type enum, #92); isFileType() still
+    // re-validates at runtime — see its doc comment for why.
     const fileType = doc.file_type;
     if (!isFileType(fileType)) {
       throw new Error(`unsupported_file_type: '${fileType}'`);

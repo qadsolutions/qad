@@ -30,12 +30,12 @@ export type FileType = Database["public"]["Enums"]["document_file_type"];
  * local table — just typed against the DB-derived `FileType` so a typo here would be
  * a compile error rather than a silently-accepted bogus value.
  */
-const ALLOWED_EXTENSIONS: Record<string, FileType> = {
+const ALLOWED_EXTENSIONS = {
   pdf: "pdf",
   docx: "docx",
   txt: "txt",
   md: "md",
-};
+} as const satisfies Record<string, FileType>;
 
 /** Fallback content types for Storage when the browser sends none, keyed by file_type. */
 const CONTENT_TYPE_BY_FILE_TYPE: Record<FileType, string> = {
@@ -46,12 +46,12 @@ const CONTENT_TYPE_BY_FILE_TYPE: Record<FileType, string> = {
 };
 
 /**
- * Narrow an arbitrary string to the canonical `FileType` union. `documents.file_type`
- * is now DB-enforced (the `document_file_type` Postgres enum, #92), so this guard is
- * defense-in-depth rather than the only thing standing between a bad value and the
- * parser: it lets the worker fail a row with an unexpected `file_type` cleanly instead
- * of passing an unchecked cast into the parser's exhaustive switch (e.g. if a future
- * out-of-band write or a not-yet-migrated row reaches this code path).
+ * Re-validate a value that the generated DB types already nominally type as
+ * `FileType` (e.g. `documents.file_type`) against the canonical runtime set. This
+ * guards against the generated types being stale relative to the live schema, or an
+ * out-of-band write reaching this code path with a value outside the four allowed —
+ * defense-in-depth, not the only thing standing between a bad value and the parser's
+ * exhaustive switch, now that `document_file_type` is also a DB-enforced enum (#92).
  */
 export function isFileType(value: string): value is FileType {
   return Object.hasOwn(ALLOWED_EXTENSIONS, value);
@@ -62,7 +62,7 @@ export function resolveFileType(filename: string): FileType | null {
   const dot = filename.lastIndexOf(".");
   if (dot < 0 || dot === filename.length - 1) return null;
   const ext = filename.slice(dot + 1).toLowerCase();
-  return (ALLOWED_EXTENSIONS as Record<string, FileType>)[ext] ?? null;
+  return ALLOWED_EXTENSIONS[ext as keyof typeof ALLOWED_EXTENSIONS] ?? null;
 }
 
 /** Content type to persist to Storage: prefer the browser's, else map from file_type. */

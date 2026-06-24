@@ -20,7 +20,13 @@
 -- USING status::document_status / file_type::document_file_type casts existing
 -- text values during the ALTER — safe here because every existing row was already
 -- constrained to these four values (status) or written only by the upload path's
--- four-value isFileType()-guarded set (file_type).
+-- four-value isFileType()-guarded set (file_type). This entire file is applied as one
+-- multi-statement simple-query message (tests/helpers/setup-test-db.ts sends the whole
+-- file in a single sql.unsafe() call), which Postgres runs inside one implicit
+-- transaction. So the ACCESS EXCLUSIVE lock the first ALTER TABLE below takes on
+-- public.documents is held until that transaction commits — for the whole migration,
+-- not released after that one statement. No concurrent writer can observe or race the
+-- column type change, and no explicit LOCK TABLE is needed here.
 
 create type document_status as enum ('uploading', 'processing', 'ready', 'error');
 create type document_file_type as enum ('pdf', 'docx', 'txt', 'md');
