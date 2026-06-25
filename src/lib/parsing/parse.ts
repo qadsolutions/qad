@@ -38,5 +38,9 @@ async function extractText(buffer: Buffer, fileType: FileType): Promise<string> 
     case "txt":
     case "md":
       return parseText(buffer);
+    default: {
+      const _exhaustive: never = fileType;
+      throw new Error(`unhandled file type: ${String(_exhaustive)}`);
+    }
   }
 }

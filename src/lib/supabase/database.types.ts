@@ -163,10 +163,10 @@ export type Database = {
         Row: {
           created_at: string
           error_detail: string | null
-          file_type: string
+          file_type: Database["public"]["Enums"]["document_file_type"]
           filename: string
           id: string
-          status: string
+          status: Database["public"]["Enums"]["document_status"]
           storage_path: string
           tenant_id: string
           version: number
@@ -174,10 +174,10 @@ export type Database = {
         Insert: {
           created_at?: string
           error_detail?: string | null
-          file_type: string
+          file_type: Database["public"]["Enums"]["document_file_type"]
           filename: string
           id?: string
-          status?: string
+          status?: Database["public"]["Enums"]["document_status"]
           storage_path: string
           tenant_id: string
           version?: number
@@ -185,10 +185,10 @@ export type Database = {
         Update: {
           created_at?: string
           error_detail?: string | null
-          file_type?: string
+          file_type?: Database["public"]["Enums"]["document_file_type"]
           filename?: string
           id?: string
-          status?: string
+          status?: Database["public"]["Enums"]["document_status"]
           storage_path?: string
           tenant_id?: string
           version?: number
@@ -498,7 +498,8 @@ export type Database = {
       }
     }
     Enums: {
-      [_ in never]: never
+      document_file_type: "pdf" | "docx" | "txt" | "md"
+      document_status: "uploading" | "processing" | "ready" | "error"
     }
     CompositeTypes: {
       [_ in never]: never
@@ -625,7 +626,9 @@ export type CompositeTypes<
 
 export const Constants = {
   public: {
-    Enums: {},
+    Enums: {
+      document_file_type: ["pdf", "docx", "txt", "md"],
+      document_status: ["uploading", "processing", "ready", "error"],
+    },
   },
 } as const
-
