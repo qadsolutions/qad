@@ -4,6 +4,19 @@ import { DocumentParseError } from "@/lib/parsing/errors";
 import { parse } from "@/lib/parsing/parse";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import { isFileType } from "@/lib/documents/validation";
+import type { Database } from "@/lib/supabase/database.types";
+
+/**
+ * The subset of `document_status` this worker ever writes. Derived from the generated
+ * `document_status` enum (#92) rather than hand-declared, so it can't silently drift
+ * from the DB's allowed set — `Exclude<..., "uploading">` because `uploading` is only
+ * ever the column's insert-time default (set by the upload route, #23), never written
+ * by this worker.
+ */
+type WorkerDocumentStatus = Exclude<
+  Database["public"]["Enums"]["document_status"],
+  "uploading"
+>;
 
 /**
  * The document-ingestion background worker (issue #26).
@@ -67,9 +80,8 @@ export async function ingestDocument(documentId: string): Promise<void> {
     const blob = await downloadBytes(admin, doc.storage_path);
     const buffer = Buffer.from(await blob.arrayBuffer());
 
-    // Defense-in-depth: file_type is a plain text column (the upload path only ever
-    // writes the four valid types), so narrow it before the parser's exhaustive switch
-    // rather than blind-casting an unknown value through it.
+    // file_type is DB-enforced (document_file_type enum, #92); isFileType() still
+    // re-validates at runtime — see its doc comment for why.
     const fileType = doc.file_type;
     if (!isFileType(fileType)) {
       throw new Error(`unsupported_file_type: '${fileType}'`);
@@ -99,7 +111,7 @@ async function updateStatus(
   admin: AdminClient,
   documentId: string,
   tenantId: string | undefined,
-  patch: { status: "processing" | "ready" | "error"; error_detail: string | null },
+  patch: { status: WorkerDocumentStatus; error_detail: string | null },
 ): Promise<void> {
   let query = admin.from("documents").update(patch).eq("id", documentId);
   if (tenantId !== undefined) {
