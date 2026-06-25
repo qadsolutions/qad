@@ -3,7 +3,8 @@ import { createEmbedder, EMBEDDING_DIM } from "@/lib/ingestion/embedder";
 
 async function isOllamaReachable(baseUrl: string): Promise<boolean> {
   try {
-    const res = await fetch(`${baseUrl}/api/tags`, { signal: AbortSignal.timeout(1000) });
+    // 5s: tolerates a loaded dev machine taking longer to answer /api/tags
+    const res = await fetch(`${baseUrl}/api/tags`, { signal: AbortSignal.timeout(5000) });
     return res.ok;
   } catch {
     return false;
@@ -26,5 +27,5 @@ describe.skipIf(!reachable)("real Ollama embedder smoke test", () => {
     expect(vector.every((value) => Number.isFinite(value))).toBe(true);
 
     vi.unstubAllEnvs();
-  });
+  }, 15_000); // explicit timeout: absorbs cold nomic-embed-text load on a loaded machine
 });
