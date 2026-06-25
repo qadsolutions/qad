@@ -3,16 +3,21 @@ import postgres from "postgres";
 import { bootstrapTestDatabase } from "../helpers/setup-test-db";
 
 /**
- * Integration tests for the two CHECK constraints added in #19
+ * Integration test for the messages.role CHECK constraint added in #19
  * (20260617000002_create_core_content_tables.sql):
  *
- *   documents_status_check — status IN (uploading, processing, ready, error)
- *   messages_role_check    — role   IN (user, assistant, system)
+ *   messages_role_check — role IN (user, assistant, system)
  *
- * These run as the table owner (qad_user), so RLS does not interfere — the point
- * is to prove the DB layer itself refuses out-of-range values. Without this, a
- * typo in the migration (e.g. "uplading") would silently widen or narrow the
- * accepted value set and no other layer would catch it.
+ * Runs as the table owner (qad_user), so RLS does not interfere — the point is to
+ * prove the DB layer itself refuses out-of-range values. Without this, a typo in
+ * the migration would silently widen or narrow the accepted value set and no other
+ * layer would catch it.
+ *
+ * documents.status previously had an inline CHECK here too (documents_status_check),
+ * but #92 (20260623000001_documents_status_filetype_enums.sql) replaced it with the
+ * document_status Postgres enum so typegen emits a TS literal union instead of
+ * `string`. That coverage now lives in m3-documents-status-filetype-enums.test.ts,
+ * alongside the new document_file_type enum.
  */
 
 const TENANT_ID = "dddddddd-dddd-dddd-dddd-dddddddddddd";
@@ -47,26 +52,6 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await sql.end();
-});
-
-describe("documents.status CHECK constraint (documents_status_check)", () => {
-  it.each(["uploading", "processing", "ready", "error"])("accepts status %s", async (status) => {
-    const rows = await sql<{ status: string }[]>`
-      INSERT INTO public.documents (tenant_id, filename, file_type, storage_path, status)
-      VALUES (${TENANT_ID}, 'ok.pdf', 'pdf', 'path/ok.pdf', ${status})
-      RETURNING status
-    `;
-    expect(rows[0].status).toBe(status);
-  });
-
-  it("rejects an out-of-range status", async () => {
-    await expect(
-      sql`
-        INSERT INTO public.documents (tenant_id, filename, file_type, storage_path, status)
-        VALUES (${TENANT_ID}, 'bad.pdf', 'pdf', 'path/bad.pdf', 'uplading')
-      `,
-    ).rejects.toThrow(/violates check constraint "documents_status_check"/);
-  });
 });
 
 describe("messages.role CHECK constraint (messages_role_check)", () => {
