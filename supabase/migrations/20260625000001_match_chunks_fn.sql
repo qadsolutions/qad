@@ -10,8 +10,8 @@
 -- qualifying chunk can sit outside that window, causing the query to silently
 -- return fewer than k or lower-quality matches. SET LOCAL hnsw.ef_search = 100
 -- widens the candidate window before the filter runs. 100 is 2.5× the default;
--- the right value at scale is empirical (pgvector iterative scans in v0.8+ are
--- the permanent fix — see issue #96). SET LOCAL confines the change to the
+-- the right value at scale is empirical (pgvector iterative scans are the
+-- permanent fix — tracked in issue #96). SET LOCAL confines the change to the
 -- caller's transaction — no session-wide side-effect.
 --
 -- ISOLATION MODEL
@@ -50,11 +50,15 @@ RETURNS TABLE (
   similarity  double precision
 )
 LANGUAGE plpgsql
-VOLATILE
+VOLATILE     -- SET LOCAL inside the body is a side effect; STABLE/IMMUTABLE would be wrong
 SECURITY INVOKER
 SET search_path = public
 AS $$
 BEGIN
+  IF p_top_k IS NULL OR p_top_k <= 0 THEN
+    RAISE EXCEPTION 'p_top_k must be a positive integer, got %', p_top_k;
+  END IF;
+
   SET LOCAL hnsw.ef_search = 100;
 
   RETURN QUERY

@@ -2,8 +2,7 @@
  * Tenant-filtered vector similarity search (issue #28).
  *
  * The `searchSimilarChunks` function is the RAG retrieval step: embed the user's
- * question (M4 #29), call this, receive the top-k most-similar chunks, and build
- * the prompt (M4 #30).
+ * question, call this, receive the top-k most-similar chunks, and build the prompt.
  *
  * It delegates to the `match_chunks` PostgreSQL function
  * (20260625000001_match_chunks_fn.sql), which:
@@ -20,6 +19,7 @@
  * request body.
  */
 
+import { EMBEDDING_DIM } from "@/lib/ingestion/embedder";
 import type { TypedSupabaseClient } from "@/lib/supabase/server";
 
 /** One result row from the similarity search. */
@@ -41,7 +41,11 @@ export function getTopK(): number {
   const raw = process.env.RAG_TOP_K;
   if (!raw) return 5;
   const parsed = parseInt(raw, 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : 5;
+  if (parsed > 0) return parsed;
+  console.warn(
+    `RAG_TOP_K="${raw}" is not a valid positive integer; defaulting to 5`,
+  );
+  return 5;
 }
 
 /**
@@ -52,7 +56,8 @@ export function getTopK(): number {
  *                       (from `withTenant`) so RLS enforces isolation automatically.
  * @param tenantId       Validated tenant_id from the caller's JWT — never from the
  *                       request body.
- * @param queryEmbedding 768-dim query vector (from the embedder, M4 #29).
+ * @param queryEmbedding 768-dim query vector (nomic-embed-text). Must have exactly
+ *                       768 dimensions — throws RangeError otherwise.
  * @param topK           Number of results to return. Defaults to `RAG_TOP_K` env
  *                       var (default 5).
  */
@@ -62,6 +67,12 @@ export async function searchSimilarChunks(
   queryEmbedding: number[],
   topK?: number,
 ): Promise<ChunkMatch[]> {
+  if (queryEmbedding.length !== EMBEDDING_DIM) {
+    throw new RangeError(
+      `queryEmbedding must be ${EMBEDDING_DIM}-dimensional (nomic-embed-text), got ${queryEmbedding.length}`,
+    );
+  }
+
   const k = topK ?? getTopK();
 
   const { data, error } = await supabase.rpc("match_chunks", {
@@ -71,10 +82,18 @@ export async function searchSimilarChunks(
   });
 
   if (error) {
-    throw new Error(`Vector similarity search failed: ${error.message}`);
+    throw new Error(`Vector similarity search failed: ${error.message}`, {
+      cause: error,
+    });
   }
 
-  return (data ?? []).map((row) => ({
+  if (data === null) {
+    throw new Error(
+      "Vector similarity search returned null data with no error — unexpected PostgREST response",
+    );
+  }
+
+  return data.map((row) => ({
     chunkId: row.chunk_id,
     documentId: row.document_id,
     chunkText: row.chunk_text,
