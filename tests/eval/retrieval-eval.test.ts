@@ -6,11 +6,12 @@
  * runs each golden question through the M4 retrieval path (`match_chunks`, tenant-
  * scoped), and reports recall@k / hit-rate@k against the expected chunks.
  *
- * SELF-SKIPS unless a real Ollama is reachable AND `DATABASE_URL` is set — so CI
- * (no Ollama service) skips it by design, exactly like `ollama-embedder-smoke.test.ts`.
- * Run it on demand with `pnpm eval:retrieval` (local Ollama + test DB up), or whenever
- * the embedding model or chunking changes, and compare against
- * `docs/retrieval-eval-baseline.md`.
+ * Runs only where a real Ollama embedding model is available (local machine / GPU host,
+ * `nomic-embed-text`). CI runners have no Ollama, so this SELF-SKIPS there rather than
+ * failing — it needs both a reachable Ollama and `DATABASE_URL`, exactly like
+ * `ollama-embedder-smoke.test.ts`. Run it on demand with `pnpm eval:retrieval` (local
+ * Ollama + test DB up), or whenever the embedding model or chunking changes, and compare
+ * against `docs/retrieval-eval-baseline.md`.
  *
  * Synthetic data only (SECURITY.md §2) — the golden set is fabricated, so embedding it
  * under Ollama is safe.

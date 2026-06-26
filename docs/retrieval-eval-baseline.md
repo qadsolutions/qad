@@ -4,9 +4,11 @@ A re-runnable quality signal for the M4 retrieval path (issue #85). It measures 
 well tenant-filtered vector search (`match_chunks`, #28) surfaces the *right* chunk for
 a question — separate from CI correctness, which only proves isolation and wiring.
 
-This is **not a CI gate.** The harness self-skips unless a real Ollama is reachable and
-`DATABASE_URL` is set, so CI (no Ollama service) never runs it. Run it manually when the
-embedding model or chunking strategy changes, and compare against the baseline below.
+This is **not a CI gate.** It runs only where a real Ollama embedding model is available
+— your local machine or a GPU host (`nomic-embed-text` on `localhost:11434`). CI runners
+have no Ollama, so the harness self-skips there rather than failing (it needs both a
+reachable Ollama and `DATABASE_URL`). Run it locally — on demand, or whenever the
+embedding model or chunking strategy changes — and compare against the baseline below.
 
 ## What it does
 
