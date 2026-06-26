@@ -11,8 +11,8 @@
 -- return fewer than k or lower-quality matches. SET LOCAL hnsw.ef_search = 100
 -- widens the candidate window before the filter runs. 100 is 2.5× the default;
 -- the right value at scale is empirical (pgvector iterative scans in v0.8+ are
--- the permanent fix). SET LOCAL confines the change to the caller's transaction —
--- no session-wide side-effect.
+-- the permanent fix — see issue #96). SET LOCAL confines the change to the
+-- caller's transaction — no session-wide side-effect.
 --
 -- ISOLATION MODEL
 -- SECURITY INVOKER: the function runs with the caller's privileges.
@@ -22,6 +22,15 @@
 --     is the only isolation guard. Callers MUST supply the validated tenant_id from
 --     the request's verified JWT (never from the request body).
 -- The explicit WHERE filter is defense-in-depth on both paths.
+--
+-- SEARCH PATH
+-- SET search_path = public pins the resolution scope (Supabase linter:
+-- function_search_path_mutable). Unlike other functions in this repo that use
+-- search_path = '' + fully-qualified ::public.vector casts, match_chunks also
+-- relies on the <=> operator, which would require the ugly OPERATOR(public.<=>)
+-- syntax under an empty path. Since the vector extension is installed in public
+-- (see 20260618000003_pgvector_embeddings.sql), search_path = public lets
+-- ::vector(768) and <=> resolve normally while satisfying the linter.
 --
 -- PARAMETER ENCODING
 -- query_embedding is TEXT, not vector(768), so callers can pass the pgvector
@@ -43,6 +52,7 @@ RETURNS TABLE (
 LANGUAGE plpgsql
 VOLATILE
 SECURITY INVOKER
+SET search_path = public
 AS $$
 BEGIN
   SET LOCAL hnsw.ef_search = 100;

@@ -27,7 +27,7 @@ export interface ChunkMatch {
   chunkId: string;
   documentId: string;
   chunkText: string;
-  /** Cosine similarity ∈ [0, 1]. Higher is closer. */
+  /** Cosine similarity ∈ [-1, 1]. Higher is closer. */
   similarity: number;
 }
 
