@@ -487,6 +487,19 @@ export type Database = {
     }
     Functions: {
       custom_access_token_hook: { Args: { event: Json }; Returns: Json }
+      match_chunks: {
+        Args: {
+          query_embedding: string
+          p_tenant_id: string
+          p_top_k?: number
+        }
+        Returns: {
+          chunk_id: string
+          document_id: string
+          chunk_text: string
+          similarity: number
+        }[]
+      }
       reingest_document_chunks: {
         Args: {
           p_chunks: Json
