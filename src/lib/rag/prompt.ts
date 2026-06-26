@@ -3,10 +3,10 @@ import { getEncoding } from "js-tiktoken";
 /**
  * RAG prompt builder (issue #29).
  *
- * Turns the chunks returned by tenant-filtered retrieval (#28) into the prompt the
- * inference layer (#30 / M5) sends to the model: fixed grounding instructions, the
- * retrieved context, and the user's question — plus the list of chunk ids actually
- * included, which the endpoint reuses for citations and `retrieval_logs` (#31).
+ * Turns the chunks returned by tenant-filtered retrieval into the prompt the inference
+ * layer sends to the model: fixed grounding instructions, the retrieved context, and
+ * the user's question — plus the list of chunk ids actually included, which the query
+ * endpoint reuses for citations and retrieval logging.
  *
  * This module is pure (no DB, no network) so it unit-tests in isolation and stays
  * independent of how retrieval or inference are wired.
@@ -20,17 +20,17 @@ const encoding = getEncoding("cl100k_base");
 
 /**
  * Default token budget for the retrieved-context section of a single prompt. Ingestion
- * caps chunks at ~512 tokens (`CHUNK_SIZE_TOKENS`), so 3000 holds roughly the top 5–6
- * chunks — aligned with the default `RAG_TOP_K=5` — while bounding the prompt so a
+ * chunks are at most ~500 tokens (`CHUNK_SIZE_TOKENS`), so 3000 holds roughly the top
+ * 5–6 chunks — aligned with the default `RAG_TOP_K=5` — while bounding the prompt so a
  * large top-k can't blow past the inference context window.
  */
 export const DEFAULT_CONTEXT_TOKEN_BUDGET = 3000;
 
 /**
  * System instructions: constrain the model to answer *only* from the supplied context
- * and to cite sources by their bracket number. The endpoint short-circuits the
- * no-context case before inference (#97); this instruction is the second line of
- * defence for when retrieval returns weak-but-nonempty context.
+ * and to cite sources by their bracket number. The query endpoint short-circuits the
+ * no-context case before inference (its empty-context guardrail); this instruction is
+ * the second line of defence for when retrieval returns weak-but-nonempty context.
  */
 export const SYSTEM_INSTRUCTIONS = [
   "You are a helpful assistant answering questions for a specific business using only that business's own documents.",
@@ -43,14 +43,14 @@ export const SYSTEM_INSTRUCTIONS = [
 ].join("\n");
 
 /**
- * Minimal shape the builder needs from a retrieved chunk. Matches the subset of #28's
+ * Minimal shape the builder needs from a retrieved chunk. Matches the subset of the
  * retrieval result used here; `similarity` is optional so the builder also works with
  * inputs that don't carry a score (it then preserves input order).
  */
 export interface PromptChunk {
   chunkId: string;
   chunkText: string;
-  /** Cosine similarity in [0, 1] from retrieval; higher is more relevant. */
+  /** Relevance score from retrieval; higher ranks first. Cosine similarity ∈ [-1, 1]. */
   similarity?: number;
 }
 
@@ -59,7 +59,7 @@ export interface BuiltPrompt {
   system: string;
   /** Retrieved context followed by the user's question. */
   user: string;
-  /** Chunk ids actually included in `user`, in presentation order — for citations + #31. */
+  /** Chunk ids actually included in `user`, in presentation order — for citations + logging. */
   chunkIdsUsed: string[];
 }
 
@@ -73,11 +73,17 @@ export function countTokens(text: string): number {
   return encoding.encode(text).length;
 }
 
-/** Truncate `text` to at most `maxTokens` `cl100k_base` tokens. */
-function truncateToTokens(text: string, maxTokens: number): string {
-  const tokens = encoding.encode(text);
-  if (tokens.length <= maxTokens) return text;
-  return encoding.decode(tokens.slice(0, maxTokens));
+/**
+ * Throw unless `value` is a usable token budget — a positive integer. Guards both the
+ * env-derived budget and a caller-supplied `contextTokenBudget`, so a `0`/`NaN`/negative
+ * override can't silently disable budgeting (NaN: every `>` comparison is false, so the
+ * loop would include everything) or emit an empty, citation-bearing context.
+ */
+function assertPositiveIntBudget(value: number, source: string): number {
+  if (!Number.isInteger(value) || value <= 0) {
+    throw new Error(`${source} must be a positive integer, got ${JSON.stringify(value)}`);
+  }
+  return value;
 }
 
 /**
@@ -88,44 +94,40 @@ function truncateToTokens(text: string, maxTokens: number): string {
 export function getContextTokenBudget(): number {
   const raw = process.env.RAG_CONTEXT_TOKEN_BUDGET;
   if (raw === undefined || raw === "") return DEFAULT_CONTEXT_TOKEN_BUDGET;
-  const value = Number(raw);
-  if (!Number.isInteger(value) || value <= 0) {
-    throw new Error(
-      `RAG_CONTEXT_TOKEN_BUDGET must be a positive integer, got "${raw}"`,
-    );
-  }
-  return value;
+  return assertPositiveIntBudget(Number(raw), "RAG_CONTEXT_TOKEN_BUDGET");
+}
+
+/** Truncate `text` to its first `maxTokens` `cl100k_base` tokens. */
+function truncateToTokens(text: string, maxTokens: number): string {
+  return encoding.decode(encoding.encode(text).slice(0, maxTokens));
 }
 
 /**
  * Build the RAG prompt from a question and retrieved chunks.
  *
- * Chunks are ranked by descending similarity (stable for ties / missing scores), then
- * included in rank order while they fit the token budget — stopping at the first chunk
- * that would overflow, so the highest-similarity chunks are always the ones kept and
- * citation numbering follows relevance. If even the single top chunk exceeds the
- * budget, it is included truncated rather than dropped, so the most relevant context
- * is never lost entirely.
+ * Chunks are ranked by descending similarity (Array.sort is stable, so ties and
+ * missing scores keep their input order), then included in rank order while they fit
+ * the token budget — stopping at the first chunk that would overflow, so the
+ * highest-similarity chunks are always the ones kept and citation numbering follows
+ * relevance. If even the single top chunk exceeds the budget, it is included truncated
+ * rather than dropped, so the most relevant context is never lost entirely.
  *
  * Returns an empty-context prompt (and empty `chunkIdsUsed`) when `chunks` is empty;
- * deciding whether to call inference at all in that case is the endpoint's job (#97).
+ * deciding whether to call inference at all in that case is the endpoint's job.
  */
 export function buildPrompt(
   question: string,
   chunks: PromptChunk[],
   options: BuildPromptOptions = {},
 ): BuiltPrompt {
-  const budget = options.contextTokenBudget ?? getContextTokenBudget();
+  const budget =
+    options.contextTokenBudget === undefined
+      ? getContextTokenBudget()
+      : assertPositiveIntBudget(options.contextTokenBudget, "contextTokenBudget");
 
-  // Stable sort by similarity desc: chunks without a score keep their input order
-  // relative to each other (treated as 0) and fall after scored chunks.
-  const ranked = chunks
-    .map((chunk, index) => ({ chunk, index }))
-    .sort((a, b) => {
-      const diff = (b.chunk.similarity ?? 0) - (a.chunk.similarity ?? 0);
-      return diff !== 0 ? diff : a.index - b.index;
-    })
-    .map((entry) => entry.chunk);
+  // Array.sort is stable (ES2019+): chunks with equal scores — including unscored
+  // chunks, all treated as 0 and sorted after scored ones — keep their input order.
+  const ranked = [...chunks].sort((a, b) => (b.similarity ?? 0) - (a.similarity ?? 0));
 
   const selected: Array<{ chunk: PromptChunk; text: string }> = [];
   let used = 0;

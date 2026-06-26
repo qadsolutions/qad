@@ -48,6 +48,22 @@ describe("buildPrompt", () => {
     expect(buildPrompt("q", unscored).chunkIdsUsed).toEqual(["a", "b"]);
   });
 
+  it("ranks scored chunks above unscored ones and keeps unscored in input order", () => {
+    const mixed: PromptChunk[] = [
+      { chunkId: "no-score-1", chunkText: "u-one" },
+      { chunkId: "scored-low", chunkText: "s-low", similarity: 0.2 },
+      { chunkId: "no-score-2", chunkText: "u-two" },
+      { chunkId: "scored-high", chunkText: "s-high", similarity: 0.9 },
+    ];
+    // Scored (0.9, 0.2) first in score order; unscored (treated as 0) after, in input order.
+    expect(buildPrompt("q", mixed).chunkIdsUsed).toEqual([
+      "scored-high",
+      "scored-low",
+      "no-score-1",
+      "no-score-2",
+    ]);
+  });
+
   it("drops lower-ranked chunks once the token budget is exhausted", () => {
     const big = "word ".repeat(40).trim(); // ~40 tokens each
     const many: PromptChunk[] = [
@@ -63,7 +79,21 @@ describe("buildPrompt", () => {
     expect(prompt.user).not.toContain("[3]");
   });
 
-  it("includes the single top chunk truncated when it alone exceeds the budget", () => {
+  it("includes a chunk that lands exactly on the budget boundary (inclusive)", () => {
+    const text = "alpha beta gamma delta";
+    const n = countTokens(text);
+    const two: PromptChunk[] = [
+      { chunkId: "first", chunkText: text, similarity: 0.9 },
+      { chunkId: "second", chunkText: text, similarity: 0.8 },
+    ];
+
+    // Budget is exactly two chunks' worth: `used + tokens > budget` is strict, so the
+    // second chunk (landing on the boundary, used + tokens === budget) is kept.
+    const prompt = buildPrompt("q", two, { contextTokenBudget: n * 2 });
+    expect(prompt.chunkIdsUsed).toEqual(["first", "second"]);
+  });
+
+  it("includes the single top chunk truncated, with real content, when it alone exceeds the budget", () => {
     const huge = "alpha bravo charlie delta echo ".repeat(50).trim();
     expect(countTokens(huge)).toBeGreaterThan(10);
 
@@ -72,9 +102,14 @@ describe("buildPrompt", () => {
     });
 
     expect(prompt.chunkIdsUsed).toEqual(["only"]);
-    // The rendered chunk text is truncated to the budget (allow for the "[1] " prefix).
-    const rendered = prompt.user.split("Question:")[0];
-    expect(countTokens(rendered)).toBeLessThanOrEqual(10 + 20);
+
+    // The truncated context must carry real, non-empty content from the chunk — not an
+    // empty "[1] " citation — and be a genuine prefix of the original text.
+    const rendered = prompt.user.split("\n\nQuestion:")[0].replace(/^Context:\n\[1\] /, "");
+    expect(rendered.length).toBeGreaterThan(0);
+    expect(rendered.trim()).not.toBe("");
+    expect(huge.startsWith(rendered)).toBe(true);
+    expect(countTokens(rendered)).toBeLessThanOrEqual(10);
   });
 
   it("emits an explicit no-context prompt and empty chunkIdsUsed for zero chunks", () => {
@@ -84,6 +119,17 @@ describe("buildPrompt", () => {
     expect(prompt.user).toContain("No relevant context was retrieved.");
     expect(prompt.user).toContain("Question: anything?");
   });
+
+  it.each([0, -1, NaN, 12.5])(
+    "throws on an invalid contextTokenBudget override (%s) instead of silently degrading",
+    (value) => {
+      expect(() =>
+        buildPrompt("q", [{ chunkId: "a", chunkText: "text", similarity: 0.9 }], {
+          contextTokenBudget: value,
+        }),
+      ).toThrow(/contextTokenBudget must be a positive integer/);
+    },
+  );
 });
 
 describe("getContextTokenBudget", () => {
