@@ -10,7 +10,7 @@
     "pretest": "node scripts/ensure-test-db.mjs",
     "test": "vitest run",
     "test:watch": "vitest",
-    "eval:retrieval": "node scripts/ensure-test-db.mjs && vitest run tests/eval/retrieval-eval.test.ts"
+    "eval:retrieval": "node scripts/ensure-test-db.mjs && vitest run tests/eval/retrieval-eval.test.ts --disableConsoleIntercept"
   },
   "dependencies": {
     "@supabase/ssr": "^0.12.0",

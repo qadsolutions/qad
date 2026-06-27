@@ -176,6 +176,11 @@ export const GOLDEN_QUESTIONS: GoldenQuestion[] = [
     expectedChunkIds: [CHUNK.LABOR_WARRANTY],
   },
   {
+    id: "q-parts-warranty",
+    question: "How long are manufacturer parts covered under warranty?",
+    expectedChunkIds: [CHUNK.PARTS_WARRANTY],
+  },
+  {
     id: "q-cancellation",
     question: "What happens if I need to cancel my appointment?",
     expectedChunkIds: [CHUNK.CANCELLATION],
@@ -191,8 +196,16 @@ export const GOLDEN_QUESTIONS: GoldenQuestion[] = [
  * Negative probes — questions the corpus does NOT answer. Not scored for recall;
  * the harness reports their top similarity so the relevance-threshold work (#97) can
  * later assert these fall below the cutoff (no confident false answer).
+ *
+ * Two flavours, because both matter for threshold tuning:
+ *   - far  : clearly out-of-domain (taxes, pet sitting) — should score low.
+ *   - near : adjacent home-services the corpus doesn't cover (plumbing, electrical) —
+ *            the hard case; these sit closest to the cutoff and are where a naive
+ *            threshold produces false answers.
  */
 export const NEGATIVE_QUESTIONS: Array<{ id: string; question: string }> = [
   { id: "nq-taxes", question: "Can you help me file my income taxes this year?" },
   { id: "nq-petsitting", question: "Do you offer pet sitting or dog boarding services?" },
+  { id: "nq-plumbing", question: "Do you do plumbing repairs like fixing a leaky faucet?" },
+  { id: "nq-electrical", question: "Can you rewire the electrical panel in my house?" },
 ];

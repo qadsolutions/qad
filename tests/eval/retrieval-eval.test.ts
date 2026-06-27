@@ -3,8 +3,10 @@
  *
  * Re-runnable quality signal — NOT a CI correctness gate. It ingests the synthetic
  * golden set (real Ollama `nomic-embed-text` embeddings) into the pgvector test DB,
- * runs each golden question through the M4 retrieval path (`match_chunks`, tenant-
- * scoped), and reports recall@k / hit-rate@k against the expected chunks.
+ * runs each golden question through the same `match_chunks` SQL function the retrieval
+ * path uses — called directly over the raw `postgres` driver, since there's no local
+ * PostgREST for `searchSimilarChunks()` to reach (the whole integration suite works this
+ * way) — and reports recall@k / hit-rate@k against the expected chunks.
  *
  * Runs only where a real Ollama embedding model is available (local machine / GPU host,
  * `nomic-embed-text`). CI runners have no Ollama, so this SELF-SKIPS there rather than
@@ -45,7 +47,7 @@ async function isOllamaReachable(baseUrl: string): Promise<boolean> {
 const OLLAMA_URL = process.env.OLLAMA_EMBED_URL ?? "http://localhost:11434";
 const shouldRun = Boolean(process.env.DATABASE_URL) && (await isOllamaReachable(OLLAMA_URL));
 
-let sql: ReturnType<typeof postgres>;
+let sql: ReturnType<typeof postgres> | undefined;
 
 describe.skipIf(!shouldRun)("retrieval-quality eval over the golden set (#85)", () => {
   beforeAll(async () => {
@@ -100,13 +102,15 @@ describe.skipIf(!shouldRun)("retrieval-quality eval over the golden set (#85)", 
   it(
     "scores recall@k / hit-rate@k for the golden questions and reports per-question hits",
     async () => {
+      if (!sql) throw new Error("test DB connection not initialised");
+      const db = sql;
       const k = getTopK();
       const embedder = createEmbedder();
 
       const questionVectors = await embedder.embed(GOLDEN_QUESTIONS.map((q) => q.question));
       const scored: ScoredQuestion[] = [];
       for (let i = 0; i < GOLDEN_QUESTIONS.length; i++) {
-        const rows = await sql<{ chunk_id: string }[]>`
+        const rows = await db<{ chunk_id: string }[]>`
           SELECT chunk_id FROM match_chunks(${vectorLiteral(questionVectors[i])}, ${GOLDEN_TENANT_ID}::uuid, ${k})
         `;
         scored.push(
@@ -123,14 +127,16 @@ describe.skipIf(!shouldRun)("retrieval-quality eval over the golden set (#85)", 
       console.log("\n" + formatReport(report));
 
       // Negative probes: report the top similarity so #97's threshold work can be tuned.
-      for (const nq of NEGATIVE_QUESTIONS) {
-        const [qv] = await embedder.embed([nq.question]);
-        const rows = await sql<{ similarity: number }[]>`
-          SELECT similarity FROM match_chunks(${vectorLiteral(qv)}, ${GOLDEN_TENANT_ID}::uuid, 1)
+      // Batch the embeddings in one call, same as the positive questions above.
+      const negativeVectors = await embedder.embed(NEGATIVE_QUESTIONS.map((nq) => nq.question));
+      for (let i = 0; i < NEGATIVE_QUESTIONS.length; i++) {
+        const rows = await db<{ similarity: number }[]>`
+          SELECT similarity FROM match_chunks(${vectorLiteral(negativeVectors[i])}, ${GOLDEN_TENANT_ID}::uuid, 1)
         `;
-        console.log(
-          `  [NEG ] ${nq.id}: top similarity ${(rows[0]?.similarity ?? 0).toFixed(3)} — "${nq.question}"`,
-        );
+        // Distinguish "no rows" from a genuine 0.0 similarity — they mean different
+        // things when calibrating the #97 relevance threshold.
+        const top = rows.length === 0 ? "n/a (no rows)" : rows[0].similarity.toFixed(3);
+        console.log(`  [NEG ] ${NEGATIVE_QUESTIONS[i].id}: top similarity ${top} — "${NEGATIVE_QUESTIONS[i].question}"`);
       }
 
       // Sanity invariants (metrics well-formed) plus a gross-regression floor — the

@@ -46,6 +46,10 @@ describe("scoreQuestion", () => {
     expect(() => scoreQuestion(q(["a"]), ["a"], 0)).toThrow(/k must be a positive integer/);
   });
 
+  it("throws on a non-integer k", () => {
+    expect(() => scoreQuestion(q(["a"]), ["a"], 2.5)).toThrow(/k must be a positive integer/);
+  });
+
   it("throws when scoring a negative probe (no expected chunks)", () => {
     expect(() => scoreQuestion(q([]), ["a"], 5)).toThrow(/negative probes are not scored/);
   });
@@ -84,6 +88,7 @@ describe("formatReport", () => {
     ];
     const text = formatReport(aggregate(scored, k));
 
+    expect(text).toContain("mean recall@5: 50.0%");
     expect(text).toContain("hit-rate@5: 50.0%");
     expect(text).toContain("[HIT ] hit-q");
     expect(text).toContain("[MISS] miss-q");

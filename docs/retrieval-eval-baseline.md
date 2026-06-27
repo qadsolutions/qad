@@ -34,42 +34,43 @@ Metric math lives in `src/lib/rag/eval-metrics.ts` and is unit-tested in CI
 pnpm eval:retrieval
 ```
 
-The script starts the `qad-test-db` container (via `scripts/ensure-test-db.mjs`) and runs
-only the eval. To see the full report, vitest intercepts console output by default — add
-`--disableConsoleIntercept` if a run shows no table:
-
-```bash
-pnpm exec vitest run tests/eval/retrieval-eval.test.ts --disableConsoleIntercept
-```
+The script starts the `qad-test-db` container (via `scripts/ensure-test-db.mjs`), runs
+only the eval, and passes `--disableConsoleIntercept` so the report table prints (vitest
+swallows console output by default).
 
 ## Baseline
 
 | Field | Value |
 |---|---|
-| Date recorded | 2026-06-26 |
+| Date recorded | 2026-06-27 |
 | Embedding model | `nomic-embed-text` (768-dim, Ollama) |
 | Retrieval | `match_chunks`, `hnsw.ef_search = 100`, cosine |
 | k (`RAG_TOP_K`) | 5 |
-| Golden questions | 12 (1 expected chunk each) |
+| Golden questions | 13 (1 expected chunk each) |
 | **mean recall@5** | **100.0%** |
 | **hit-rate@5** | **100.0%** |
 
-All 12 questions retrieved their expected chunk within the top 5.
+All 13 questions retrieved their expected chunk within the top 5.
 
 ### Negative probes
 
-Questions the corpus does **not** answer, with their top-1 cosine similarity:
+Questions the corpus does **not** answer, with their top-1 cosine similarity. Split into
+*far* (clearly out-of-domain) and *near* (adjacent home-services the corpus doesn't cover
+— the hard case for a threshold):
 
-| Probe | Question | Top similarity |
-|---|---|---|
-| `nq-taxes` | "Can you help me file my income taxes this year?" | 0.506 |
-| `nq-petsitting` | "Do you offer pet sitting or dog boarding services?" | 0.566 |
+| Probe | Kind | Question | Top similarity |
+|---|---|---|---|
+| `nq-taxes` | far | "Can you help me file my income taxes this year?" | 0.506 |
+| `nq-petsitting` | far | "Do you offer pet sitting or dog boarding services?" | 0.566 |
+| `nq-electrical` | near | "Can you rewire the electrical panel in my house?" | 0.566 |
+| `nq-plumbing` | near | "Do you do plumbing repairs like fixing a leaky faucet?" | 0.641 |
 
-> **Note for the relevance-threshold work (#97):** these unrelated queries still score
-> ~0.51–0.57. `nomic-embed-text` produces a fairly high similarity floor even for
-> off-topic text, so a naive `RAG_MIN_SIMILARITY` cutoff in the low 0.5s would **not**
-> reliably reject them. The threshold needs to be tuned against both the positive
-> baseline and these negatives — this harness is how to do it.
+> **Note for the relevance-threshold work (#97):** even clearly off-topic queries score
+> ~0.51–0.57, and the near-domain `nq-plumbing` reaches **0.641** — `nomic-embed-text`
+> produces a high similarity floor, so a naive `RAG_MIN_SIMILARITY` cutoff in the 0.5s
+> would **not** reliably reject these false matches without also risking real ones. The
+> near probes (0.57–0.64) are the band the threshold must thread; tune it against both
+> this positive baseline and these negatives — this harness is how to do it.
 
 ## Interpreting changes
 
