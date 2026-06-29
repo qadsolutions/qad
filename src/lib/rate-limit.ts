@@ -34,13 +34,21 @@ const QUERY_SCOPE = "query";
 
 const DAY_MS = 86_400_000;
 
-/** Read a positive-integer env var, falling back to `fallback`; throw on a bad value. */
+/**
+ * Read a positive-integer env var, falling back to `fallback` when unset or invalid.
+ *
+ * Fail safe, not fatal: these are read lazily on the request path, so throwing on a bad
+ * value would turn a typo in a cost-guard limit into a 500 on every query/upload. Instead
+ * we log loudly and fall back to the default, keeping the limiter working — consistent
+ * with the fail-open posture this module applies to runtime errors.
+ */
 function readPositiveIntEnv(name: string, fallback: number): number {
   const raw = process.env[name];
   if (raw === undefined || raw === "") return fallback;
   const value = Number(raw);
   if (!Number.isInteger(value) || value <= 0) {
-    throw new Error(`${name} must be a positive integer, got "${raw}"`);
+    console.error(`${name} must be a positive integer, got "${raw}"; falling back to ${fallback}`);
+    return fallback;
   }
   return value;
 }

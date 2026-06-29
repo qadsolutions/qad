@@ -26,9 +26,13 @@ describe("config readers", () => {
     expect(getQueriesPerMinute()).toBe(30);
   });
 
-  it.each(["0", "-5", "abc", "1.5"])("throw on invalid value %s", (value) => {
+  it.each(["0", "-5", "abc", "1.5"])("fall back to the default and log on invalid value %s", (value) => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     vi.stubEnv("RATE_LIMIT_UPLOADS_PER_DAY", value);
-    expect(() => getUploadsPerDay()).toThrow(/RATE_LIMIT_UPLOADS_PER_DAY/);
+    // Fail safe, not fatal: a bad cost-guard limit must not 500 the request path.
+    expect(getUploadsPerDay()).toBe(DEFAULT_UPLOADS_PER_DAY);
+    expect(errorSpy).toHaveBeenCalled();
+    errorSpy.mockRestore();
   });
 });
 
