@@ -1,8 +1,9 @@
 /**
  * Per-tenant rate limiting (issue #62).
  *
- * Two cost vectors, two mechanisms — both enforced server-side inside the `withTenant`
- * path via the service-role admin client, both returning 429 when exceeded:
+ * Two cost vectors, two mechanisms — both checked server-side inside the `withTenant`
+ * path via the service-role admin client, and surfaced as a 429 by the route layer when
+ * exceeded (the upload route does so today; the query route's wiring lands with #30):
  *
  *   - Queries (RATE_LIMIT_QUERIES_PER_MINUTE): a durable, multi-instance-correct fixed
  *     window backed by the `rate_limit_counters` table, incremented atomically by the
@@ -85,14 +86,16 @@ export async function checkQueryRateLimit(
     p_window_seconds: QUERY_WINDOW_SECONDS,
   });
 
+  // Fail open on either failure mode — a transient counter problem must not block queries.
+  // Log with both ids since the counter is keyed by (tenant, user): tenant alone can't
+  // identify which counter failed.
+  if (error) {
+    console.error(`query rate-limit increment failed for tenant ${tenantId} user ${userId}: ${error.message}`);
+    return { allowed: true, limit, remaining: limit, resetAt: Date.now() + QUERY_WINDOW_SECONDS * 1000 };
+  }
   const row = data?.[0];
-  if (error || !row) {
-    if (error) {
-      console.error(`query rate-limit increment failed for tenant ${tenantId}: ${error.message}`);
-    } else {
-      console.error(`query rate-limit increment returned no row for tenant ${tenantId}`);
-    }
-    // Fail open: don't block queries on a transient counter failure.
+  if (!row) {
+    console.error(`query rate-limit increment returned no row for tenant ${tenantId} user ${userId}`);
     return { allowed: true, limit, remaining: limit, resetAt: Date.now() + QUERY_WINDOW_SECONDS * 1000 };
   }
 
@@ -118,7 +121,13 @@ export interface UploadRateLimitResult {
  * correct across instances, no extra table. `tenantId` must come from the validated
  * token, never the request body.
  *
- * Fails OPEN on a counting error (returns allowed, logs) — see the module header.
+ * This is a non-atomic count-then-insert (unlike the query limiter's atomic upsert), so
+ * two requests racing at the exact boundary can both pass and over-count by one. That's
+ * an accepted trade-off for a daily cost guard — a single extra upload at the boundary is
+ * harmless, and the trailing-window count needs no extra table.
+ *
+ * Fails OPEN on a counting error or a null count (returns allowed, logs) — see the module
+ * header.
  */
 export async function checkUploadRateLimit(
   admin: TypedSupabaseClient,
@@ -137,7 +146,12 @@ export async function checkUploadRateLimit(
     console.error(`upload rate-limit count failed for tenant ${tenantId}: ${error.message}`);
     return { allowed: true, limit, used: 0 };
   }
+  // A null count with no error is an ambiguous PostgREST response; treat it as a fail-open
+  // too rather than silently reading it as zero uploads (which would mask a broken count).
+  if (count === null) {
+    console.error(`upload rate-limit count returned null for tenant ${tenantId}; failing open`);
+    return { allowed: true, limit, used: 0 };
+  }
 
-  const used = count ?? 0;
-  return { allowed: used < limit, limit, used };
+  return { allowed: count < limit, limit, used: count };
 }

@@ -44,7 +44,12 @@ function ctx(): TenantHandlerContext {
 
 /** Mock service-role client supporting the handler's storage + table writes. */
 function mockAdmin(
-  opts: { uploadError?: unknown; insertError?: unknown; uploadCount?: number } = {},
+  opts: {
+    uploadError?: unknown;
+    insertError?: unknown;
+    uploadCount?: number;
+    uploadCountError?: unknown;
+  } = {},
 ) {
   // Typed via a generic so `upload.mock.calls[0]` is a [path, body, opts] tuple — the
   // implementation itself ignores its args.
@@ -57,7 +62,10 @@ function mockAdmin(
   const remove = vi.fn(async () => ({ data: [], error: null }));
   const insert = vi.fn(async () => ({ error: opts.insertError ?? null }));
   // Upload rate-limit count chain (#62): from("documents").select(..).eq(..).gte(..)
-  const gte = vi.fn(async () => ({ count: opts.uploadCount ?? 0, error: null }));
+  const gte = vi.fn(async () => ({
+    count: opts.uploadCountError ? null : (opts.uploadCount ?? 0),
+    error: opts.uploadCountError ?? null,
+  }));
   const eq = vi.fn(() => ({ gte }));
   const select = vi.fn(() => ({ eq }));
   const storageFrom = vi.fn(() => ({ upload, remove }));
@@ -198,6 +206,36 @@ describe("uploadHandler", () => {
     const [storagePath] = admin.upload.mock.calls[0];
     expect(admin.remove).toHaveBeenCalledExactlyOnceWith([storagePath]);
     expect(triggerIngestion).not.toHaveBeenCalled();
+  });
+
+  it("returns 429 and touches neither storage nor db when the daily upload cap is reached", async () => {
+    vi.stubEnv("RATE_LIMIT_UPLOADS_PER_DAY", "2");
+    const admin = mockAdmin({ uploadCount: 2 }); // already at the limit
+
+    const res = await uploadHandler(uploadRequest("sample.pdf"), ctx());
+
+    expect(res.status).toBe(429);
+    const body = (await res.json()) as { error: string; message: string };
+    expect(body.error).toBe("rate_limited");
+    expect(body.message).toContain("2 per day");
+    // The cap is enforced before the body is parsed, so nothing is stored or written.
+    expect(admin.upload).not.toHaveBeenCalled();
+    expect(admin.insert).not.toHaveBeenCalled();
+    expect(triggerIngestion).not.toHaveBeenCalled();
+  });
+
+  it("fails open (202) when the upload rate-limit count itself errors", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const admin = mockAdmin({ uploadCountError: { message: "count boom" } });
+
+    const res = await uploadHandler(uploadRequest("sample.pdf"), ctx());
+
+    // A broken cost-guard count must not block uploads — the request proceeds normally.
+    expect(res.status).toBe(202);
+    expect(admin.upload).toHaveBeenCalled();
+    expect(admin.insert).toHaveBeenCalled();
+    expect(errorSpy).toHaveBeenCalled();
+    errorSpy.mockRestore();
   });
 
   it("sanitizes the filename in the storage path but keeps it verbatim on the row", async () => {

@@ -39,7 +39,9 @@ async function asUser<T>(
   }) as Promise<T>;
 }
 
-type IncrementRow = { current_count: number; reset_at: string };
+// The pg driver returns timestamptz as a Date (the production supabase-js/PostgREST path
+// returns an ISO string instead — see database.types.ts — but this raw-SQL test sees a Date).
+type IncrementRow = { current_count: number; reset_at: Date };
 
 function increment(
   tenantId: string,
@@ -85,10 +87,10 @@ describe("increment_rate_limit", () => {
 
     expect(first.current_count).toBe(1);
     expect(second.current_count).toBe(2); // same aligned 60s window -> same row
-    // reset_at = window_start + 60s, identical for both calls in the window. The pg driver
-    // returns timestamptz as a Date, so compare by value (getTime), not object identity.
-    expect(new Date(second.reset_at).getTime()).toBe(new Date(first.reset_at).getTime());
-    expect(new Date(first.reset_at).getTime()).toBeGreaterThan(Date.now());
+    // reset_at = window_start + 60s, identical for both calls in the window. Compare by
+    // value (getTime), not object identity — the driver returns two distinct Date objects.
+    expect(second.reset_at.getTime()).toBe(first.reset_at.getTime());
+    expect(first.reset_at.getTime()).toBeGreaterThan(Date.now());
   });
 
   it("keys each (tenant,user) independently", async () => {
