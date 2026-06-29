@@ -193,19 +193,46 @@ export const GOLDEN_QUESTIONS: GoldenQuestion[] = [
 ];
 
 /**
- * Negative probes — questions the corpus does NOT answer. Not scored for recall;
- * the harness reports their top similarity so the relevance-threshold work (#97) can
- * later assert these fall below the cutoff (no confident false answer).
+ * Why a negative question is unanswerable. These all surface as the *same* no-context
+ * response, but they are different behaviours — so the eval tags each one, and the
+ * abstention assertion (with #97's threshold + #30's answer path) must credit a refusal
+ * only when it fires for the RIGHT reason. Without that, a system that refuses
+ * everything passes the negative set while quietly tanking the answerable set.
  *
- * Two flavours, because both matter for threshold tuning:
- *   - far  : clearly out-of-domain (taxes, pet sitting) — should score low.
- *   - near : adjacent home-services the corpus doesn't cover (plumbing, electrical) —
- *            the hard case; these sit closest to the cutoff and are where a naive
- *            threshold produces false answers.
+ *   - out_of_domain : the business simply doesn't do this (taxes, pet sitting), or it's
+ *                     an adjacent trade the corpus doesn't cover (plumbing, electrical —
+ *                     the near-boundary hard case for a threshold).
+ *   - underspecified: an in-domain topic, but too vague to answer from one chunk (the
+ *                     right behaviour is to ask for clarification, not to refuse-as-
+ *                     out-of-domain and not to confidently answer).
+ *   - false_premise : presupposes an offering that doesn't exist (a membership plan, a
+ *                     loyalty discount) — in-domain wording, but the premise is false.
  */
-export const NEGATIVE_QUESTIONS: Array<{ id: string; question: string }> = [
-  { id: "nq-taxes", question: "Can you help me file my income taxes this year?" },
-  { id: "nq-petsitting", question: "Do you offer pet sitting or dog boarding services?" },
-  { id: "nq-plumbing", question: "Do you do plumbing repairs like fixing a leaky faucet?" },
-  { id: "nq-electrical", question: "Can you rewire the electrical panel in my house?" },
+export type NegativeReason = "out_of_domain" | "underspecified" | "false_premise";
+
+export interface NegativeQuestion {
+  id: string;
+  question: string;
+  reason: NegativeReason;
+}
+
+/**
+ * Negative probes — questions the corpus does NOT answer. Not scored for recall; the
+ * harness reports each probe's top similarity and the per-reason distribution so #97 can
+ * calibrate `RAG_MIN_SIMILARITY` against the band these occupy (and later assert the
+ * answer path refuses for the tagged reason).
+ */
+export const NEGATIVE_QUESTIONS: NegativeQuestion[] = [
+  // out_of_domain — far (clearly not this business)
+  { id: "nq-taxes", reason: "out_of_domain", question: "Can you help me file my income taxes this year?" },
+  { id: "nq-petsitting", reason: "out_of_domain", question: "Do you offer pet sitting or dog boarding services?" },
+  // out_of_domain — near (adjacent home-services the corpus doesn't cover)
+  { id: "nq-plumbing", reason: "out_of_domain", question: "Do you do plumbing repairs like fixing a leaky faucet?" },
+  { id: "nq-electrical", reason: "out_of_domain", question: "Can you rewire the electrical panel in my house?" },
+  // underspecified — in-domain but too vague to answer from a single chunk
+  { id: "nq-vague-cost", reason: "underspecified", question: "How much will it cost?" },
+  { id: "nq-availability", reason: "underspecified", question: "Can you come out?" },
+  // false_premise — presupposes an offering the business doesn't have
+  { id: "nq-membership", reason: "false_premise", question: "How do I sign up for your monthly membership plan?" },
+  { id: "nq-loyalty", reason: "false_premise", question: "How do I redeem my 20% loyalty discount?" },
 ];

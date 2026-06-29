@@ -52,25 +52,50 @@ swallows console output by default).
 
 All 13 questions retrieved their expected chunk within the top 5.
 
-### Negative probes
+### Negative probes — by refusal reason
 
-Questions the corpus does **not** answer, with their top-1 cosine similarity. Split into
-*far* (clearly out-of-domain) and *near* (adjacent home-services the corpus doesn't cover
-— the hard case for a threshold):
+Questions the corpus does **not** answer, each tagged by *why* it's unanswerable. They all
+surface as the same no-context response but are different behaviours, so the eval tags
+them — and a later abstention assertion must credit a refusal only when it fires for the
+**right reason**. Otherwise a refuse-everything system passes the whole negative set while
+quietly tanking the answerable one.
 
-| Probe | Kind | Question | Top similarity |
+| Probe | Reason | Question | Top similarity |
 |---|---|---|---|
-| `nq-taxes` | far | "Can you help me file my income taxes this year?" | 0.506 |
-| `nq-petsitting` | far | "Do you offer pet sitting or dog boarding services?" | 0.566 |
-| `nq-electrical` | near | "Can you rewire the electrical panel in my house?" | 0.566 |
-| `nq-plumbing` | near | "Do you do plumbing repairs like fixing a leaky faucet?" | 0.641 |
+| `nq-taxes` | out_of_domain | "Can you help me file my income taxes this year?" | 0.506 |
+| `nq-petsitting` | out_of_domain | "Do you offer pet sitting or dog boarding services?" | 0.566 |
+| `nq-electrical` | out_of_domain | "Can you rewire the electrical panel in my house?" | 0.566 |
+| `nq-plumbing` | out_of_domain | "Do you do plumbing repairs like fixing a leaky faucet?" | 0.641 |
+| `nq-vague-cost` | underspecified | "How much will it cost?" | 0.630 |
+| `nq-availability` | underspecified | "Can you come out?" | 0.497 |
+| `nq-membership` | false_premise | "How do I sign up for your monthly membership plan?" | 0.554 |
+| `nq-loyalty` | false_premise | "How do I redeem my 20% loyalty discount?" | 0.566 |
 
-> **Note for the relevance-threshold work (#97):** even clearly off-topic queries score
-> ~0.51–0.57, and the near-domain `nq-plumbing` reaches **0.641** — `nomic-embed-text`
-> produces a high similarity floor, so a naive `RAG_MIN_SIMILARITY` cutoff in the 0.5s
-> would **not** reliably reject these false matches without also risking real ones. The
-> near probes (0.57–0.64) are the band the threshold must thread; tune it against both
-> this positive baseline and these negatives — this harness is how to do it.
+Top-1 similarity distribution by reason:
+
+| Reason | n | min | mean | max |
+|---|---|---|---|---|
+| out_of_domain | 4 | 0.506 | 0.570 | 0.641 |
+| underspecified | 2 | 0.497 | 0.563 | 0.630 |
+| false_premise | 2 | 0.554 | 0.560 | 0.566 |
+
+> **Threshold-calibration finding (for #97):** all three reason groups overlap in the
+> ~0.50–0.64 band, and the hardest negatives (`nq-plumbing` 0.641, `nq-vague-cost` 0.630)
+> sit right where real answerable questions also score. `nomic-embed-text` has a high
+> similarity floor, so **no single global `RAG_MIN_SIMILARITY` cutoff cleanly separates
+> answerable from unanswerable** — dropping it far enough to reject these would also reject
+> real matches. That's the load-bearing signal this harness exists to surface.
+
+#### Scoring abstention by reason, not just "did it refuse"
+
+Asserting that the answer path actually **refuses for the tagged reason** lands with the
+relevance threshold (#97) and the answer endpoint (#30); this retrieval-only eval supplies
+the per-reason distribution they calibrate against. Abstention is scored here directly
+rather than via an off-the-shelf faithfulness metric, because those return **NaN on a
+correct refusal** — there are no grounded claims to score — so a passing refusal reads as a
+hole in the dashboard rather than a pass. The load-bearing parts (tagging *why* each
+negative is unanswerable, plus the per-reason similarity distribution) are owned here
+regardless of tooling.
 
 ## Interpreting changes
 

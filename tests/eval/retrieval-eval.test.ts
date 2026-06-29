@@ -25,7 +25,15 @@ import { bootstrapTestDatabase } from "../helpers/setup-test-db";
 import { vectorLiteral } from "../helpers/vector-test-utils";
 import { createEmbedder } from "@/lib/ingestion/embedder";
 import { getTopK } from "@/lib/rag/retrieval";
-import { aggregate, formatReport, scoreQuestion, type ScoredQuestion } from "@/lib/rag/eval-metrics";
+import {
+  aggregate,
+  formatNegativeSummary,
+  formatReport,
+  scoreQuestion,
+  summarizeNegativesByReason,
+  type NegativeProbeResult,
+  type ScoredQuestion,
+} from "@/lib/rag/eval-metrics";
 import {
   GOLDEN_CHUNKS,
   GOLDEN_DOCUMENTS,
@@ -126,18 +134,26 @@ describe.skipIf(!shouldRun)("retrieval-quality eval over the golden set (#85)", 
       // Report is the point of this eval — print it for the on-demand runner.
       console.log("\n" + formatReport(report));
 
-      // Negative probes: report the top similarity so #97's threshold work can be tuned.
+      // Negative probes: each is tagged by WHY it's unanswerable (out_of_domain /
+      // underspecified / false_premise). Report each probe's top similarity plus the
+      // per-reason distribution — the calibration input for #97's threshold, and the
+      // basis for later asserting the answer path refuses for the *right* reason (a
+      // refuse-everything system would otherwise pass the negative set silently).
       // Batch the embeddings in one call, same as the positive questions above.
       const negativeVectors = await embedder.embed(NEGATIVE_QUESTIONS.map((nq) => nq.question));
+      const probes: NegativeProbeResult[] = [];
       for (let i = 0; i < NEGATIVE_QUESTIONS.length; i++) {
         const rows = await db<{ similarity: number }[]>`
           SELECT similarity FROM match_chunks(${vectorLiteral(negativeVectors[i])}, ${GOLDEN_TENANT_ID}::uuid, 1)
         `;
-        // Distinguish "no rows" from a genuine 0.0 similarity — they mean different
-        // things when calibrating the #97 relevance threshold.
-        const top = rows.length === 0 ? "n/a (no rows)" : rows[0].similarity.toFixed(3);
-        console.log(`  [NEG ] ${NEGATIVE_QUESTIONS[i].id}: top similarity ${top} — "${NEGATIVE_QUESTIONS[i].question}"`);
+        // null (no rows) is distinct from a genuine 0.0 similarity when calibrating #97.
+        const topSimilarity = rows.length === 0 ? null : rows[0].similarity;
+        const nq = NEGATIVE_QUESTIONS[i];
+        probes.push({ id: nq.id, reason: nq.reason, topSimilarity });
+        const shown = topSimilarity === null ? "n/a (no rows)" : topSimilarity.toFixed(3);
+        console.log(`  [NEG ${nq.reason}] ${nq.id}: top similarity ${shown} — "${nq.question}"`);
       }
+      console.log("\n" + formatNegativeSummary(summarizeNegativesByReason(probes)));
 
       // Sanity invariants (metrics well-formed) plus a gross-regression floor — the
       // precise baseline is recorded in docs/retrieval-eval-baseline.md, not asserted

@@ -111,3 +111,74 @@ export function formatReport(report: EvalReport): string {
   }
   return lines.join("\n");
 }
+
+/** One negative probe's outcome: its reason tag and top-1 retrieval similarity. */
+export interface NegativeProbeResult {
+  id: string;
+  reason: string;
+  /** Top-1 similarity from retrieval; null when retrieval returned no rows at all. */
+  topSimilarity: number | null;
+}
+
+export interface NegativeReasonSummary {
+  reason: string;
+  /** Probes in this group, including any that retrieved no rows. */
+  count: number;
+  /** Stats over the group's non-null similarities; null when the group has none. */
+  minSimilarity: number | null;
+  meanSimilarity: number | null;
+  maxSimilarity: number | null;
+}
+
+/**
+ * Group negative probes by their tagged reason and summarise the top-1 similarity
+ * distribution per reason — the calibration input for the relevance threshold (#97).
+ * Reasons appear in first-seen order. A `null` similarity (no rows retrieved) is still
+ * counted but excluded from the stats, so "refused outright" and "matched something"
+ * stay distinct.
+ *
+ * The reason tag is what lets a later assertion credit a refusal only when it fires for
+ * the right reason: an out-of-domain miss, an underspecified question, and a false
+ * premise all surface as the same no-context response but are different behaviours.
+ */
+export function summarizeNegativesByReason(probes: NegativeProbeResult[]): NegativeReasonSummary[] {
+  const order: string[] = [];
+  const sims = new Map<string, number[]>();
+  const counts = new Map<string, number>();
+  for (const probe of probes) {
+    if (!sims.has(probe.reason)) {
+      sims.set(probe.reason, []);
+      counts.set(probe.reason, 0);
+      order.push(probe.reason);
+    }
+    counts.set(probe.reason, counts.get(probe.reason)! + 1);
+    if (probe.topSimilarity !== null) sims.get(probe.reason)!.push(probe.topSimilarity);
+  }
+  return order.map((reason) => {
+    const values = sims.get(reason)!;
+    const count = counts.get(reason)!;
+    if (values.length === 0) {
+      return { reason, count, minSimilarity: null, meanSimilarity: null, maxSimilarity: null };
+    }
+    return {
+      reason,
+      count,
+      minSimilarity: Math.min(...values),
+      meanSimilarity: values.reduce((sum, v) => sum + v, 0) / values.length,
+      maxSimilarity: Math.max(...values),
+    };
+  });
+}
+
+/** Render the per-reason negative summary for on-demand runs. */
+export function formatNegativeSummary(summaries: NegativeReasonSummary[]): string {
+  const lines = ["Negative probes — top-1 similarity by reason (calibration for #97):"];
+  for (const s of summaries) {
+    const stat =
+      s.meanSimilarity === null
+        ? "no rows retrieved"
+        : `min ${s.minSimilarity!.toFixed(3)}  mean ${s.meanSimilarity.toFixed(3)}  max ${s.maxSimilarity!.toFixed(3)}`;
+    lines.push(`  ${s.reason} (n=${s.count}): ${stat}`);
+  }
+  return lines.join("\n");
+}

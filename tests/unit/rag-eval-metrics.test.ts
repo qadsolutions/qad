@@ -3,6 +3,7 @@ import {
   aggregate,
   formatReport,
   scoreQuestion,
+  summarizeNegativesByReason,
   type GoldenQuestion,
 } from "@/lib/rag/eval-metrics";
 
@@ -92,5 +93,42 @@ describe("formatReport", () => {
     expect(text).toContain("hit-rate@5: 50.0%");
     expect(text).toContain("[HIT ] hit-q");
     expect(text).toContain("[MISS] miss-q");
+  });
+});
+
+describe("summarizeNegativesByReason", () => {
+  it("groups by reason in first-seen order and summarises non-null similarities", () => {
+    const summaries = summarizeNegativesByReason([
+      { id: "a", reason: "out_of_domain", topSimilarity: 0.5 },
+      { id: "b", reason: "false_premise", topSimilarity: 0.7 },
+      { id: "c", reason: "out_of_domain", topSimilarity: 0.6 },
+    ]);
+
+    expect(summaries.map((s) => s.reason)).toEqual(["out_of_domain", "false_premise"]);
+    const ood = summaries[0];
+    expect(ood.count).toBe(2);
+    expect(ood.minSimilarity).toBeCloseTo(0.5, 6);
+    expect(ood.maxSimilarity).toBeCloseTo(0.6, 6);
+    expect(ood.meanSimilarity).toBeCloseTo(0.55, 6);
+  });
+
+  it("counts no-row (null) probes but excludes them from the stats", () => {
+    const [summary] = summarizeNegativesByReason([
+      { id: "a", reason: "underspecified", topSimilarity: null },
+      { id: "b", reason: "underspecified", topSimilarity: 0.4 },
+    ]);
+    expect(summary.count).toBe(2);
+    expect(summary.minSimilarity).toBeCloseTo(0.4, 6);
+    expect(summary.meanSimilarity).toBeCloseTo(0.4, 6);
+  });
+
+  it("reports null stats for a reason whose probes all retrieved no rows", () => {
+    const [summary] = summarizeNegativesByReason([
+      { id: "a", reason: "out_of_domain", topSimilarity: null },
+    ]);
+    expect(summary.count).toBe(1);
+    expect(summary.minSimilarity).toBeNull();
+    expect(summary.meanSimilarity).toBeNull();
+    expect(summary.maxSimilarity).toBeNull();
   });
 });
