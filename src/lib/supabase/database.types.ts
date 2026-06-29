@@ -335,6 +335,45 @@ export type Database = {
           },
         ]
       }
+      rate_limit_counters: {
+        Row: {
+          count: number
+          scope: string
+          tenant_id: string
+          user_id: string
+          window_start: string
+        }
+        Insert: {
+          count?: number
+          scope: string
+          tenant_id: string
+          user_id: string
+          window_start: string
+        }
+        Update: {
+          count?: number
+          scope?: string
+          tenant_id?: string
+          user_id?: string
+          window_start?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "rate_limit_counters_tenant_id_fkey"
+            columns: ["tenant_id"]
+            isOneToOne: false
+            referencedRelation: "tenants"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "rate_limit_counters_user_id_fkey"
+            columns: ["user_id"]
+            isOneToOne: false
+            referencedRelation: "users"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       retrieval_logs: {
         Row: {
           chunk_ids: string[]
@@ -487,6 +526,18 @@ export type Database = {
     }
     Functions: {
       custom_access_token_hook: { Args: { event: Json }; Returns: Json }
+      increment_rate_limit: {
+        Args: {
+          p_tenant_id: string
+          p_user_id: string
+          p_scope: string
+          p_window_seconds: number
+        }
+        Returns: {
+          current_count: number
+          reset_at: string
+        }[]
+      }
       match_chunks: {
         Args: {
           query_embedding: string
