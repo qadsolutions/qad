@@ -136,10 +136,15 @@ export async function checkUploadRateLimit(
   const limit = getUploadsPerDay();
   const sinceIso = new Date(Date.now() - DAY_MS).toISOString();
 
+  // Exclude status: error rows so a failed ingestion (Ollama down, parse error) doesn't
+  // burn a daily slot — otherwise an outage could produce 50 errored rows and 429 the
+  // tenant for the rest of the day with zero usable documents. Counts uploading/processing/
+  // ready (the slots a real upload consumes).
   const { count, error } = await admin
     .from("documents")
     .select("id", { count: "exact", head: true })
     .eq("tenant_id", tenantId)
+    .neq("status", "error")
     .gte("created_at", sinceIso);
 
   if (error) {

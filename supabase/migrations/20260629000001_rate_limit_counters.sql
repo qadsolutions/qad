@@ -39,7 +39,12 @@ create table public.rate_limit_counters (
   constraint rate_limit_counters_nonnegative_count check (count >= 0)
 );
 
-create index rate_limit_counters_tenant_id_idx on public.rate_limit_counters (tenant_id);
+-- Index user_id (not tenant_id): a user delete cascades to this table, and user_id is
+-- NOT a leading column of the PK, so without this index that cascade sequential-scans.
+-- tenant_id needs no standalone index here — it is the PK's leading column, so the PK
+-- btree already serves tenant-scoped lookups (the RLS predicate, usage reads). This is
+-- unlike model_calls/conversations/users, whose PK is `id`, so they index tenant_id.
+create index rate_limit_counters_user_id_idx on public.rate_limit_counters (user_id);
 
 alter table public.rate_limit_counters enable row level security;
 
@@ -121,6 +126,12 @@ begin
 end;
 $$;
 
--- anon: no access. authenticated: not granted — the query limiter calls this via the
--- service-role admin client (writes are service_role-only). service_role: the limiter.
-grant execute on function public.increment_rate_limit(uuid, uuid, text, integer) to service_role;
+-- Revoke the default PUBLIC EXECUTE first so the function is never callable by a
+-- tenant-facing client (anon/authenticated), then grant only service_role — the query
+-- limiter calls it via the service-role admin client. Same posture as
+-- reingest_document_chunks (20260622000001) and custom_access_token_hook (20260616000001).
+revoke all on function public.increment_rate_limit(uuid, uuid, text, integer)
+  from public, anon, authenticated;
+
+grant execute on function public.increment_rate_limit(uuid, uuid, text, integer)
+  to service_role;

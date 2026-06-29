@@ -61,12 +61,13 @@ function mockAdmin(
   );
   const remove = vi.fn(async () => ({ data: [], error: null }));
   const insert = vi.fn(async () => ({ error: opts.insertError ?? null }));
-  // Upload rate-limit count chain (#62): from("documents").select(..).eq(..).gte(..)
+  // Upload rate-limit count chain (#62): from("documents").select(..).eq(..).neq(..).gte(..)
   const gte = vi.fn(async () => ({
     count: opts.uploadCountError ? null : (opts.uploadCount ?? 0),
     error: opts.uploadCountError ?? null,
   }));
-  const eq = vi.fn(() => ({ gte }));
+  const neq = vi.fn(() => ({ gte }));
+  const eq = vi.fn(() => ({ neq }));
   const select = vi.fn(() => ({ eq }));
   const storageFrom = vi.fn(() => ({ upload, remove }));
   const from = vi.fn(() => ({ insert, select }));

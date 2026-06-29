@@ -103,10 +103,21 @@ describe("checkQueryRateLimit", () => {
 describe("checkUploadRateLimit", () => {
   function adminWithCount(count: number | null, error: unknown = null): TypedSupabaseClient {
     const gte = vi.fn(async () => ({ count, error }));
-    const eq = vi.fn(() => ({ gte }));
+    const neq = vi.fn(() => ({ gte }));
+    const eq = vi.fn(() => ({ neq }));
     const select = vi.fn(() => ({ eq }));
     return { from: vi.fn(() => ({ select })) } as unknown as TypedSupabaseClient;
   }
+
+  it("excludes status: error rows so failed ingestions don't burn the daily quota", async () => {
+    const gte = vi.fn(async () => ({ count: 0, error: null }));
+    const neq = vi.fn(() => ({ gte }));
+    const eq = vi.fn(() => ({ neq }));
+    const select = vi.fn(() => ({ eq }));
+    const admin = { from: vi.fn(() => ({ select })) } as unknown as TypedSupabaseClient;
+    await checkUploadRateLimit(admin, "t1");
+    expect(neq).toHaveBeenCalledWith("status", "error");
+  });
 
   it("allows when uploads used is below the limit", async () => {
     vi.stubEnv("RATE_LIMIT_UPLOADS_PER_DAY", "5");
