@@ -49,6 +49,32 @@ export function getTopK(): number {
 }
 
 /**
+ * Read `RAG_HNSW_EF_SEARCH` from the environment; defaults to 100 if unset or
+ * invalid.
+ *
+ * ef_search controls how many candidates the HNSW graph traversal keeps in its
+ * priority queue before applying the tenant_id post-filter. A higher value
+ * improves recall at the cost of slightly more CPU per query. 100 is 2.5× the
+ * pgvector default (40) — sufficient for most multi-tenant workloads. Increase
+ * if tenants reliably return fewer than top-k results at scale, or if the ratio
+ * of inter-tenant to intra-tenant vectors is high.
+ *
+ * Trade-off: each doubling of ef_search roughly doubles traversal work. Above
+ * ~400, diminishing returns typically set in. Benchmark before increasing beyond
+ * the default for latency-sensitive deployments (target: < 200ms per query).
+ */
+export function getEfSearch(): number {
+  const raw = process.env.RAG_HNSW_EF_SEARCH;
+  if (!raw) return 100;
+  const parsed = parseInt(raw, 10);
+  if (parsed > 0) return parsed;
+  console.warn(
+    `RAG_HNSW_EF_SEARCH="${raw}" is not a valid positive integer; defaulting to 100`,
+  );
+  return 100;
+}
+
+/**
  * Return the top-k document chunks most similar to `queryEmbedding`, scoped to
  * `tenantId`.
  *
@@ -60,12 +86,16 @@ export function getTopK(): number {
  *                       768 dimensions — throws RangeError otherwise.
  * @param topK           Number of results to return. Defaults to `RAG_TOP_K` env
  *                       var (default 5).
+ * @param efSearch       HNSW candidate window size passed as `p_ef_search` to
+ *                       `match_chunks`. Defaults to `RAG_HNSW_EF_SEARCH` env var
+ *                       (default 100). See `getEfSearch()` for the trade-off notes.
  */
 export async function searchSimilarChunks(
   supabase: TypedSupabaseClient,
   tenantId: string,
   queryEmbedding: number[],
   topK?: number,
+  efSearch?: number,
 ): Promise<ChunkMatch[]> {
   if (queryEmbedding.length !== EMBEDDING_DIM) {
     throw new RangeError(
@@ -74,11 +104,13 @@ export async function searchSimilarChunks(
   }
 
   const k = topK ?? getTopK();
+  const ef = efSearch ?? getEfSearch();
 
   const { data, error } = await supabase.rpc("match_chunks", {
     query_embedding: toVectorLiteral(queryEmbedding),
     p_tenant_id: tenantId,
     p_top_k: k,
+    p_ef_search: ef,
   });
 
   if (error) {

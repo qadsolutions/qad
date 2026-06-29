@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { EMBEDDING_DIM } from "@/lib/ingestion/embedder";
-import { getTopK, searchSimilarChunks } from "@/lib/rag/retrieval";
+import { getEfSearch, getTopK, searchSimilarChunks } from "@/lib/rag/retrieval";
 import type { TypedSupabaseClient } from "@/lib/supabase/server";
 
 // Minimal stub — only the rpc method is exercised by these tests.
@@ -55,6 +55,50 @@ describe("getTopK", () => {
     vi.stubEnv("RAG_TOP_K", "-3");
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     expect(getTopK()).toBe(5);
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// getEfSearch
+// ---------------------------------------------------------------------------
+
+describe("getEfSearch", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("returns 100 when RAG_HNSW_EF_SEARCH is unset", () => {
+    vi.stubEnv("RAG_HNSW_EF_SEARCH", "");
+    expect(getEfSearch()).toBe(100);
+  });
+
+  it("returns the parsed value when RAG_HNSW_EF_SEARCH is a valid positive integer", () => {
+    vi.stubEnv("RAG_HNSW_EF_SEARCH", "200");
+    expect(getEfSearch()).toBe(200);
+  });
+
+  it("returns 100 and warns when RAG_HNSW_EF_SEARCH is not a number", () => {
+    vi.stubEnv("RAG_HNSW_EF_SEARCH", "abc");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    expect(getEfSearch()).toBe(100);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("RAG_HNSW_EF_SEARCH"));
+    warn.mockRestore();
+  });
+
+  it("returns 100 and warns when RAG_HNSW_EF_SEARCH is zero", () => {
+    vi.stubEnv("RAG_HNSW_EF_SEARCH", "0");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    expect(getEfSearch()).toBe(100);
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it("returns 100 and warns when RAG_HNSW_EF_SEARCH is negative", () => {
+    vi.stubEnv("RAG_HNSW_EF_SEARCH", "-5");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    expect(getEfSearch()).toBe(100);
     expect(warn).toHaveBeenCalled();
     warn.mockRestore();
   });
@@ -146,6 +190,25 @@ describe("searchSimilarChunks", () => {
     expect(client.rpc).toHaveBeenCalledWith(
       "match_chunks",
       expect.objectContaining({ p_top_k: 5 }),
+    );
+  });
+
+  it("passes p_ef_search to rpc using getEfSearch() default when efSearch is omitted", async () => {
+    vi.stubEnv("RAG_HNSW_EF_SEARCH", "");
+    const client = makeClient({ data: [], error: null });
+    await searchSimilarChunks(client, TENANT_ID, EMBEDDING);
+    expect(client.rpc).toHaveBeenCalledWith(
+      "match_chunks",
+      expect.objectContaining({ p_ef_search: 100 }),
+    );
+  });
+
+  it("passes an explicit efSearch value to rpc when provided", async () => {
+    const client = makeClient({ data: [], error: null });
+    await searchSimilarChunks(client, TENANT_ID, EMBEDDING, undefined, 150);
+    expect(client.rpc).toHaveBeenCalledWith(
+      "match_chunks",
+      expect.objectContaining({ p_ef_search: 150 }),
     );
   });
 
