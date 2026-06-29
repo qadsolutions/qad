@@ -24,6 +24,7 @@ import {
   validateUpload,
 } from "@/lib/documents/validation";
 import { triggerIngestion } from "@/lib/ingestion/trigger";
+import { checkUploadRateLimit } from "@/lib/rate-limit";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 
 const STORAGE_BUCKET = "documents";
@@ -45,6 +46,18 @@ export const uploadHandler: TenantRouteHandler = async (req, { tenant }) => {
     return errorResponse(413, "file_too_large", "File exceeds the 50MB limit");
   }
 
+  // Per-tenant daily upload cap (#62) — reject before buffering the body. Scoped to
+  // tenant.tenantId from the validated token. The same admin client is reused below.
+  const admin = createSupabaseAdminClient();
+  const uploadLimit = await checkUploadRateLimit(admin, tenant.tenantId);
+  if (!uploadLimit.allowed) {
+    return errorResponse(
+      429,
+      "rate_limited",
+      `Daily upload limit reached (${uploadLimit.limit} per day). Try again later.`,
+    );
+  }
+
   let form: FormData;
   try {
     form = await req.formData();
@@ -64,7 +77,6 @@ export const uploadHandler: TenantRouteHandler = async (req, { tenant }) => {
 
   const documentId = crypto.randomUUID();
   const storagePath = `${tenant.tenantId}/${documentId}/${sanitizeFilename(uploaded.name)}`;
-  const admin = createSupabaseAdminClient();
 
   // 1. Store the raw file. `upsert: false` so a generated-uuid collision surfaces as an
   // error rather than silently overwriting another document's bytes.

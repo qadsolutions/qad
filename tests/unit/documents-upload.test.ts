@@ -43,7 +43,9 @@ function ctx(): TenantHandlerContext {
 }
 
 /** Mock service-role client supporting the handler's storage + table writes. */
-function mockAdmin(opts: { uploadError?: unknown; insertError?: unknown } = {}) {
+function mockAdmin(
+  opts: { uploadError?: unknown; insertError?: unknown; uploadCount?: number } = {},
+) {
   // Typed via a generic so `upload.mock.calls[0]` is a [path, body, opts] tuple — the
   // implementation itself ignores its args.
   const upload = vi.fn<(path: string, body: unknown, opts?: unknown) => Promise<unknown>>(
@@ -54,8 +56,12 @@ function mockAdmin(opts: { uploadError?: unknown; insertError?: unknown } = {}) 
   );
   const remove = vi.fn(async () => ({ data: [], error: null }));
   const insert = vi.fn(async () => ({ error: opts.insertError ?? null }));
+  // Upload rate-limit count chain (#62): from("documents").select(..).eq(..).gte(..)
+  const gte = vi.fn(async () => ({ count: opts.uploadCount ?? 0, error: null }));
+  const eq = vi.fn(() => ({ gte }));
+  const select = vi.fn(() => ({ eq }));
   const storageFrom = vi.fn(() => ({ upload, remove }));
-  const from = vi.fn(() => ({ insert }));
+  const from = vi.fn(() => ({ insert, select }));
   const client = { storage: { from: storageFrom }, from } as unknown as TypedSupabaseClient;
   vi.mocked(createSupabaseAdminClient).mockReturnValue(client);
   return { upload, remove, insert, storageFrom, from };
@@ -73,6 +79,7 @@ function uploadRequest(filename: string, content = "hello world", type = ""): Ne
 
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.unstubAllEnvs();
 });
 
 describe("validation helpers", () => {
