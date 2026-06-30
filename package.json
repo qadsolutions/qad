@@ -13,8 +13,10 @@
     "eval:retrieval": "node scripts/ensure-test-db.mjs && vitest run tests/eval/retrieval-eval.test.ts --disableConsoleIntercept"
   },
   "dependencies": {
+    "@ai-sdk/groq": "^4.0.1",
     "@supabase/ssr": "^0.12.0",
     "@supabase/supabase-js": "^2.108.2",
+    "ai": "^7.0.7",
     "js-tiktoken": "^1.0.21",
     "mammoth": "^1.12.0",
     "next": "16.2.8",
