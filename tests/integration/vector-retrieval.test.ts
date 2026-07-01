@@ -1,7 +1,7 @@
 /**
  * Integration tests for tenant-filtered vector similarity search (issue #28).
  *
- * Tests the `match_chunks` PostgreSQL function (20260625000001_match_chunks_fn.sql)
+ * Tests the `match_chunks` PostgreSQL function (20260629000001_match_chunks_ef_search.sql)
  * which is the M4 retrieval path. Covers the issue's acceptance criteria:
  *
  *   - Cosine similarity search using the HNSW index, results ordered by distance

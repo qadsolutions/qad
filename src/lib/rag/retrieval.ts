@@ -5,7 +5,7 @@
  * question, call this, receive the top-k most-similar chunks, and build the prompt.
  *
  * It delegates to the `match_chunks` PostgreSQL function
- * (20260625000001_match_chunks_fn.sql), which:
+ * (20260629000001_match_chunks_ef_search.sql), which:
  *   - raises `hnsw.ef_search` per query to mitigate multi-tenant post-filter
  *     recall loss on the shared HNSW index,
  *   - applies `WHERE tenant_id = p_tenant_id` as defense-in-depth, and
@@ -36,16 +36,29 @@ function toVectorLiteral(values: readonly number[]): string {
   return `[${values.join(",")}]`;
 }
 
+/**
+ * Parse an environment variable as a positive integer, falling back to
+ * `defaultValue` (with a warning) on missing or invalid input.
+ *
+ * Uses `Number()` + `Number.isInteger()` rather than `parseInt()`: `parseInt`
+ * stops at the first non-numeric character (`parseInt("200abc")` → `200`) and
+ * accepts scientific notation as a truncated integer (`parseInt("1.5e3")` →
+ * `1`), both of which would silently produce a wildly wrong value here.
+ */
+function getPositiveIntEnv(name: string, defaultValue: number): number {
+  const raw = process.env[name];
+  if (!raw) return defaultValue;
+  const parsed = Number(raw);
+  if (Number.isInteger(parsed) && parsed > 0) return parsed;
+  console.warn(
+    `${name}="${raw}" is not a valid positive integer; defaulting to ${defaultValue}`,
+  );
+  return defaultValue;
+}
+
 /** Read `RAG_TOP_K` from the environment; defaults to 5 if unset or invalid. */
 export function getTopK(): number {
-  const raw = process.env.RAG_TOP_K;
-  if (!raw) return 5;
-  const parsed = parseInt(raw, 10);
-  if (parsed > 0) return parsed;
-  console.warn(
-    `RAG_TOP_K="${raw}" is not a valid positive integer; defaulting to 5`,
-  );
-  return 5;
+  return getPositiveIntEnv("RAG_TOP_K", 5);
 }
 
 /**
@@ -64,14 +77,7 @@ export function getTopK(): number {
  * the default for latency-sensitive deployments (target: < 200ms per query).
  */
 export function getEfSearch(): number {
-  const raw = process.env.RAG_HNSW_EF_SEARCH;
-  if (!raw) return 100;
-  const parsed = parseInt(raw, 10);
-  if (parsed > 0) return parsed;
-  console.warn(
-    `RAG_HNSW_EF_SEARCH="${raw}" is not a valid positive integer; defaulting to 100`,
-  );
-  return 100;
+  return getPositiveIntEnv("RAG_HNSW_EF_SEARCH", 100);
 }
 
 /**

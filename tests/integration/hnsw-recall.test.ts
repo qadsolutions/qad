@@ -17,6 +17,15 @@
  *     (closer to the query), designed to dominate the HNSW candidate window
  *
  * With a sufficiently large ef_search, all 3 Tenant A chunks must be found.
+ *
+ * Corpus-size caveat: this suite seeds only 13 total vectors, small enough that
+ * HNSW traverses effectively the entire graph regardless of ef_search — so the
+ * "wide ef_search recovers all 3" assertion below cannot by itself falsify a
+ * recall regression at this scale. It is a tenant-isolation regression guard
+ * (no cross-tenant leakage at various ef_search values), not proof that
+ * ef_search widening fixes recall on a large adversarial corpus. The forwarding
+ * of `p_ef_search` to the RPC call is covered — and is the real correctness
+ * check for this parameter — by the unit tests in `tests/unit/retrieval.test.ts`.
  */
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -121,9 +130,12 @@ afterAll(async () => {
 describe("HNSW filtered-recall (#96): adversarial multi-tenant corpus", () => {
   it("returns all k=3 Tenant A chunks with a wide ef_search even when Tenant B dominates the index", async () => {
     // Query is hot at dimension 100 — both tenants have vectors near this point.
-    // Tenant B's vectors are closer (0.95 vs 0.8), so without ef_search widening
-    // a tiny candidate window could be exhausted by Tenant B vectors before
-    // finding all Tenant A chunks.
+    // Tenant B's vectors are closer (0.95 vs 0.8). NOTE: with only 13 total
+    // vectors in this corpus, HNSW traverses nearly the whole graph regardless
+    // of ef_search, so this assertion alone can't distinguish "ef_search fixed
+    // it" from "the corpus was too small to lose recall in the first place" —
+    // see the module-level comment. It still guards tenant isolation across
+    // ef_search values, which is real coverage.
     const query = vectorLiteral(unitish(100));
 
     // ef_search=200 gives ample candidate headroom beyond the 13 total vectors.
