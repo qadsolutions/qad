@@ -23,6 +23,13 @@
  * and — once inference finishes — the assistant message, a retrieval_logs row, and a
  * best-effort model_calls row. The assistant-side writes run in the inference provider's
  * `onFinish`, which every provider completes before the response stream closes.
+ *
+ * WRITE FAILURE POLICY: the two writes that must exist before any answer — creating the
+ * conversation and recording the user turn — are checked and return 500 on failure (a
+ * corrupt/absent conversation would make the whole exchange meaningless). The post-answer
+ * writes (assistant message, retrieval log, model_calls) are best-effort and only logged:
+ * the answer has already been decided/streamed, so a logging failure must not surface as an
+ * error to the user — but it must never be swallowed silently either.
  */
 
 import { withTenant, type TenantRouteHandler } from "@/lib/auth/with-tenant";
@@ -67,8 +74,9 @@ function parseBody(raw: unknown): { question: string; conversationId?: string } 
 /**
  * Resolve the conversation to attach this query to: reuse `conversationId` only if it
  * exists AND belongs to `tenantId` (verified via the admin client, explicitly scoped to
- * tenant_id — never trust the body's id alone); otherwise create a new conversation. The
- * created/looked-up id is returned for the message rows.
+ * tenant_id — never trust the body's id alone); otherwise create a new conversation.
+ * Returns the conversation id, or null if creating a fresh conversation failed (logged) —
+ * the caller turns that into a 500, since nothing else can attach without it.
  */
 async function resolveConversationId(
   admin: TypedSupabaseClient,
@@ -76,7 +84,7 @@ async function resolveConversationId(
   userId: string,
   question: string,
   conversationId: string | undefined,
-): Promise<string> {
+): Promise<string | null> {
   if (conversationId) {
     const { data, error } = await admin
       .from("conversations")
@@ -92,39 +100,71 @@ async function resolveConversationId(
   // Seed a title from the question so the M6/M7 conversation list has a label; the column
   // is plain text, so a short slice is enough and avoids unbounded titles.
   const title = question.length > 80 ? `${question.slice(0, 77)}...` : question;
-  await admin.from("conversations").insert({
+  const { error } = await admin.from("conversations").insert({
     id: newId,
     tenant_id: tenantId,
     user_id: userId,
     title,
   });
+  if (error) {
+    console.error(`conversation insert failed for tenant ${tenantId}: ${error.message}`);
+    return null;
+  }
   return newId;
 }
 
-/** Insert a message row scoped to the tenant; returns the generated id. */
+/**
+ * Insert a message row scoped to the tenant. Returns the generated id, or null on failure
+ * (logged). The caller decides whether that's fatal (the user turn, pre-answer → 500) or
+ * best-effort (the assistant turn, post-answer → just logged).
+ */
 async function insertMessage(
   admin: TypedSupabaseClient,
   tenantId: string,
   conversationId: string,
   role: "user" | "assistant",
   content: string,
-): Promise<string> {
+): Promise<string | null> {
   const id = crypto.randomUUID();
-  await admin.from("messages").insert({
+  const { error } = await admin.from("messages").insert({
     id,
     tenant_id: tenantId,
     conversation_id: conversationId,
     role,
     content,
   });
+  if (error) {
+    console.error(`message insert (${role}) failed for tenant ${tenantId}: ${error.message}`);
+    return null;
+  }
   return id;
+}
+
+/** Best-effort retrieval log for an assistant message — logs on failure, never throws. */
+async function insertRetrievalLog(
+  admin: TypedSupabaseClient,
+  tenantId: string,
+  messageId: string,
+  chunkIds: string[],
+  similarityScores: number[],
+): Promise<void> {
+  const { error } = await admin.from("retrieval_logs").insert({
+    message_id: messageId,
+    tenant_id: tenantId,
+    chunk_ids: chunkIds,
+    similarity_scores: similarityScores,
+  });
+  if (error) {
+    console.error(`retrieval_logs insert failed for tenant ${tenantId}: ${error.message}`);
+  }
 }
 
 /**
  * Persist the assistant turn: the assistant message, its retrieval log (the chunk ids +
- * aligned similarity scores actually used), and a best-effort model_calls row. The
- * model_calls insert is wrapped so a logging failure never breaks the user's response —
- * the answer has already streamed. Returns nothing; callers fire this from `onFinish`.
+ * aligned similarity scores actually used), and a best-effort model_calls row. ALL writes
+ * here are post-answer — the response has already streamed — so each only logs on failure
+ * and never throws. If the assistant message itself can't be written, the retrieval log is
+ * skipped (it has nothing to attach to). Callers fire this from the provider's `onFinish`.
  */
 async function persistAssistantTurn(
   admin: TypedSupabaseClient,
@@ -138,24 +178,14 @@ async function persistAssistantTurn(
   usage: { promptTokens: number; completionTokens: number },
   latencyMs: number,
 ): Promise<void> {
-  const assistantMessageId = await insertMessage(
-    admin,
-    tenantId,
-    conversationId,
-    "assistant",
-    answer,
-  );
-
-  await admin.from("retrieval_logs").insert({
-    message_id: assistantMessageId,
-    tenant_id: tenantId,
-    chunk_ids: chunkIdsUsed,
-    similarity_scores: similarityScores,
-  });
+  const assistantMessageId = await insertMessage(admin, tenantId, conversationId, "assistant", answer);
+  if (assistantMessageId) {
+    await insertRetrievalLog(admin, tenantId, assistantMessageId, chunkIdsUsed, similarityScores);
+  }
 
   // Best-effort usage accounting — must not fail the (already-streamed) response.
   try {
-    await admin.from("model_calls").insert({
+    const { error } = await admin.from("model_calls").insert({
       tenant_id: tenantId,
       user_id: userId,
       model_name: modelName,
@@ -163,9 +193,12 @@ async function persistAssistantTurn(
       completion_tokens: usage.completionTokens,
       latency_ms: latencyMs,
     });
+    if (error) {
+      console.error(`model_calls insert failed for tenant ${tenantId} user ${userId}: ${error.message}`);
+    }
   } catch (err) {
     console.error(
-      `model_calls insert failed for tenant ${tenantId} user ${userId}: ${
+      `model_calls insert threw for tenant ${tenantId} user ${userId}: ${
         err instanceof Error ? err.message : String(err)
       }`,
     );
@@ -204,7 +237,8 @@ export const queryHandler: TenantRouteHandler = async (req, { tenant }) => {
   const { question, conversationId } = parsed;
 
   // 3. Resolve the conversation and record the user turn up front (so history exists even
-  // if inference later errors). All writes scoped to the validated token's tenant.
+  // if inference later errors). These two writes must succeed — a missing conversation or
+  // user message makes the exchange meaningless — so a failure is a 500, not best-effort.
   const conversation = await resolveConversationId(
     admin,
     tenant.tenantId,
@@ -212,7 +246,13 @@ export const queryHandler: TenantRouteHandler = async (req, { tenant }) => {
     question,
     conversationId,
   );
-  await insertMessage(admin, tenant.tenantId, conversation, "user", question);
+  if (!conversation) {
+    return errorResponse(500, "internal_error", "Failed to record the conversation");
+  }
+  const userMessageId = await insertMessage(admin, tenant.tenantId, conversation, "user", question);
+  if (!userMessageId) {
+    return errorResponse(500, "internal_error", "Failed to record the message");
+  }
 
   // 4. Embed the question and run tenant-filtered vector search.
   const [embedding] = await createEmbedder().embed([question]);
@@ -230,7 +270,7 @@ export const queryHandler: TenantRouteHandler = async (req, { tenant }) => {
 
   // 5a. Empty-context guardrail: when retrieval returns nothing, short-circuit BEFORE
   // inference (prompt.ts documents this) — return the canned answer and still persist the
-  // assistant message + an empty retrieval log. No model_calls row (no model was called).
+  // assistant message + an empty retrieval log (best-effort). No model_calls (no model ran).
   if (built.chunkIdsUsed.length === 0) {
     const assistantMessageId = await insertMessage(
       admin,
@@ -239,12 +279,9 @@ export const queryHandler: TenantRouteHandler = async (req, { tenant }) => {
       "assistant",
       EMPTY_CONTEXT_ANSWER,
     );
-    await admin.from("retrieval_logs").insert({
-      message_id: assistantMessageId,
-      tenant_id: tenant.tenantId,
-      chunk_ids: [],
-      similarity_scores: [],
-    });
+    if (assistantMessageId) {
+      await insertRetrievalLog(admin, tenant.tenantId, assistantMessageId, [], []);
+    }
     // Trivially stream the canned text so the client sees one consistent response shape.
     return new Response(EMPTY_CONTEXT_ANSWER, {
       status: 200,

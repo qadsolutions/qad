@@ -57,6 +57,8 @@ function mockAdmin(
   opts: {
     currentCount?: number;
     conversationLookup?: { id: string } | null;
+    /** Force a given table's insert to return an error (drives the 500 / best-effort paths). */
+    insertErrors?: Partial<Record<keyof AdminInserts, { message: string }>>;
   } = {},
 ) {
   const inserts: AdminInserts = {
@@ -73,8 +75,9 @@ function mockAdmin(
 
   const from = vi.fn((table: keyof AdminInserts) => {
     const insert = vi.fn(async (row: Record<string, unknown>) => {
-      inserts[table].push(row);
-      return { error: null };
+      const error = opts.insertErrors?.[table] ?? null;
+      if (!error) inserts[table].push(row);
+      return { error };
     });
     // conversations ownership lookup: select("id").eq("id").eq("tenant_id").maybeSingle()
     const maybeSingle = vi.fn(async () => ({
@@ -263,6 +266,40 @@ describe("queryHandler", () => {
     const res = await queryHandler(queryRequest("{not valid json"), ctx());
     expect(res.status).toBe(400);
     await expect(res.json()).resolves.toMatchObject({ error: "invalid_request" });
+  });
+
+  it("returns 500 (not a silent failure) when creating the conversation fails", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const admin = mockAdmin({ insertErrors: { conversations: { message: "db down" } } });
+    mockEmbedder();
+    mockRetrieval([chunk("c1", "ctx", 0.9)]);
+
+    const res = await queryHandler(queryRequest({ question: "What is alpha?" }), ctx());
+
+    expect(res.status).toBe(500);
+    await expect(res.json()).resolves.toMatchObject({ error: "internal_error" });
+    expect(errorSpy).toHaveBeenCalled();
+    // Bailed before any downstream work: no user message, no embedding, no search.
+    expect(admin.inserts.messages).toHaveLength(0);
+    expect(createEmbedder).not.toHaveBeenCalled();
+    expect(searchSimilarChunks).not.toHaveBeenCalled();
+    errorSpy.mockRestore();
+  });
+
+  it("returns 500 when recording the user message fails", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const admin = mockAdmin({ insertErrors: { messages: { message: "db down" } } });
+    mockEmbedder();
+    mockRetrieval([chunk("c1", "ctx", 0.9)]);
+
+    const res = await queryHandler(queryRequest({ question: "What is alpha?" }), ctx());
+
+    expect(res.status).toBe(500);
+    await expect(res.json()).resolves.toMatchObject({ error: "internal_error" });
+    // Conversation was created; we bailed at the failed user-message write, before embedding.
+    expect(admin.inserts.conversations).toHaveLength(1);
+    expect(createEmbedder).not.toHaveBeenCalled();
+    errorSpy.mockRestore();
   });
 
   it("short-circuits the empty-context case: canned answer, no inference, empty log", async () => {
