@@ -22,7 +22,10 @@
  * conversation (reused if the caller passed one it owns, else created), the user message,
  * and — once inference finishes — the assistant message, a retrieval_logs row, and a
  * best-effort model_calls row. The assistant-side writes run in the inference provider's
- * `onFinish`, which every provider completes before the response stream closes.
+ * `onFinish`, which every provider completes before a *normal* stream close. Caveat: if the
+ * client aborts mid-stream, `onFinish` may not fire, so the assistant-side rows can be
+ * absent (the user turn is already committed). Acceptable at prototype scale; abort-safe
+ * persistence is tracked for M10 hardening.
  *
  * WRITE FAILURE POLICY: the two writes that must exist before any answer — creating the
  * conversation and recording the user turn — are checked and return 500 on failure (a
@@ -57,13 +60,20 @@ interface QueryBody {
   conversation_id?: string;
 }
 
+/**
+ * Upper bound on a question's length. Guards the embed (Ollama compute), the DB write, and
+ * the tokens forwarded to inference against an oversized single request — the per-user rate
+ * cap limits frequency, but not the size of any one question. Generous vs. a normal query.
+ */
+const MAX_QUESTION_CHARS = 8000;
+
 /** Parse and validate the request body. Returns the trimmed question on success. */
 function parseBody(raw: unknown): { question: string; conversationId?: string } | null {
   if (typeof raw !== "object" || raw === null) return null;
   const body = raw as Partial<QueryBody>;
   if (typeof body.question !== "string") return null;
   const question = body.question.trim();
-  if (question.length === 0) return null;
+  if (question.length === 0 || question.length > MAX_QUESTION_CHARS) return null;
   const conversationId =
     typeof body.conversation_id === "string" && body.conversation_id.length > 0
       ? body.conversation_id
@@ -73,10 +83,13 @@ function parseBody(raw: unknown): { question: string; conversationId?: string } 
 
 /**
  * Resolve the conversation to attach this query to: reuse `conversationId` only if it
- * exists AND belongs to `tenantId` (verified via the admin client, explicitly scoped to
- * tenant_id — never trust the body's id alone); otherwise create a new conversation.
- * Returns the conversation id, or null if creating a fresh conversation failed (logged) —
- * the caller turns that into a 500, since nothing else can attach without it.
+ * exists AND belongs to this `userId` within this `tenantId` (verified via the admin
+ * client, explicitly scoped — never trust the body's id alone); otherwise create a new
+ * conversation. Scoping by user_id (not tenant_id alone) matters because a tenant is
+ * multi-user (M6 Client Portal): without it, any user could append their turn to another
+ * same-tenant user's thread just by passing its id. Returns the conversation id, or null
+ * if creating a fresh conversation failed (logged) — the caller turns that into a 500,
+ * since nothing else can attach without it.
  */
 async function resolveConversationId(
   admin: TypedSupabaseClient,
@@ -91,9 +104,10 @@ async function resolveConversationId(
       .select("id")
       .eq("id", conversationId)
       .eq("tenant_id", tenantId)
+      .eq("user_id", userId)
       .maybeSingle();
     if (!error && data) return data.id;
-    // Not found / not this tenant's / lookup error → fall through and create a fresh one.
+    // Not found / not this user's / lookup error → fall through and create a fresh one.
   }
 
   const newId = crypto.randomUUID();
@@ -232,7 +246,11 @@ export const queryHandler: TenantRouteHandler = async (req, { tenant }) => {
   }
   const parsed = parseBody(raw);
   if (!parsed) {
-    return errorResponse(400, "invalid_request", "A non-empty question is required");
+    return errorResponse(
+      400,
+      "invalid_request",
+      `A non-empty question of at most ${MAX_QUESTION_CHARS} characters is required`,
+    );
   }
   const { question, conversationId } = parsed;
 

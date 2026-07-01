@@ -68,6 +68,10 @@ function mockAdmin(
     model_calls: [],
   };
 
+  // Every .eq(column, value) applied to the conversations ownership lookup, so tests can
+  // assert the scoping filters (id + tenant_id + user_id).
+  const conversationFilters: Array<[string, unknown]> = [];
+
   const rpc = vi.fn(async () => ({
     data: [{ current_count: opts.currentCount ?? 1, reset_at: RESET_AT }],
     error: null,
@@ -79,20 +83,26 @@ function mockAdmin(
       if (!error) inserts[table].push(row);
       return { error };
     });
-    // conversations ownership lookup: select("id").eq("id").eq("tenant_id").maybeSingle()
+    // conversations lookup: select("id").eq("id").eq("tenant_id").eq("user_id").maybeSingle().
+    // Fluent chain records each .eq filter and supports any number of them.
     const maybeSingle = vi.fn(async () => ({
       data: opts.conversationLookup ?? null,
       error: null,
     }));
-    const eqTenant = vi.fn(() => ({ maybeSingle }));
-    const eqId = vi.fn(() => ({ eq: eqTenant }));
-    const select = vi.fn(() => ({ eq: eqId }));
+    const selectChain = {
+      eq: vi.fn((column: string, value: unknown) => {
+        conversationFilters.push([column, value]);
+        return selectChain;
+      }),
+      maybeSingle,
+    };
+    const select = vi.fn(() => selectChain);
     return { insert, select };
   });
 
   const client = { rpc, from } as unknown as TypedSupabaseClient;
   vi.mocked(createSupabaseAdminClient).mockReturnValue(client);
-  return { inserts, rpc, from };
+  return { inserts, rpc, from, conversationFilters };
 }
 
 /** Stub the embedder with a fixed vector (retrieval is mocked, so the value is unused). */
@@ -218,7 +228,7 @@ describe("queryHandler", () => {
     });
   });
 
-  it("reuses an existing conversation that belongs to the tenant", async () => {
+  it("reuses an existing conversation owned by the same user, scoped by user_id", async () => {
     const CONV = "cccccccc-cccc-cccc-cccc-cccccccccccc";
     const admin = mockAdmin({ conversationLookup: { id: CONV } });
     mockEmbedder();
@@ -235,6 +245,38 @@ describe("queryHandler", () => {
     expect(admin.inserts.conversations).toHaveLength(0);
     expect(admin.inserts.messages[0]).toMatchObject({ conversation_id: CONV });
     expect(admin.inserts.messages[1]).toMatchObject({ conversation_id: CONV });
+
+    // Ownership lookup is scoped by user_id (not tenant alone) — a same-tenant user must not
+    // be able to hijack another user's conversation by passing its id (#106 review finding).
+    expect(admin.conversationFilters).toContainEqual(["tenant_id", TENANT_A]);
+    expect(admin.conversationFilters).toContainEqual(["user_id", USER_A]);
+  });
+
+  it("returns 400 on an oversized question (length guard)", async () => {
+    mockAdmin();
+    const res = await queryHandler(queryRequest({ question: "x".repeat(8001) }), ctx());
+    expect(res.status).toBe(400);
+    await expect(res.json()).resolves.toMatchObject({ error: "invalid_request" });
+    expect(createEmbedder).not.toHaveBeenCalled();
+  });
+
+  it("still returns 200 (best-effort) when a post-answer log insert fails", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const admin = mockAdmin({ insertErrors: { retrieval_logs: { message: "log down" } } });
+    mockEmbedder();
+    mockRetrieval([chunk("c1", "ctx", 0.9)]);
+    mockProvider("Answer [1].");
+
+    const res = await queryHandler(queryRequest({ question: "What is alpha?" }), ctx());
+
+    expect(res.status).toBe(200);
+    // Draining the body drives onFinish → the (failing) post-answer writes.
+    expect(await res.text()).toBe("Answer [1].");
+    // The answer already streamed: the failed retrieval-log write is logged, never surfaced.
+    expect(admin.inserts.retrieval_logs).toHaveLength(0);
+    expect(admin.inserts.messages).toHaveLength(2); // user + assistant still recorded
+    expect(errorSpy).toHaveBeenCalled();
+    errorSpy.mockRestore();
   });
 
   it("returns 429 before any work when the query rate limit is exceeded", async () => {

@@ -78,8 +78,8 @@ export const DEFAULT_GROQ_MODEL = "llama-3.3-70b-versatile";
 
 /** Resolve the Groq model id from `GROQ_MODEL`, defaulting to {@link DEFAULT_GROQ_MODEL}. */
 export function getGroqModel(): string {
-  const raw = process.env.GROQ_MODEL;
-  return raw && raw.length > 0 ? raw : DEFAULT_GROQ_MODEL;
+  // `|| default` covers both unset and empty string (both falsy).
+  return process.env.GROQ_MODEL || DEFAULT_GROQ_MODEL;
 }
 
 function requireEnv(name: "GROQ_API_KEY"): string {
@@ -144,7 +144,7 @@ class MockInferenceProvider implements InferenceProvider {
       promptTokens: countWords(options.system) + countWords(options.prompt),
       completionTokens: countWords(MOCK_ANSWER),
     };
-    return buildTextStreamResult([...MOCK_ANSWER_PARTS], MOCK_ANSWER, usage, options.onFinish);
+    return buildTextStreamResult(MOCK_ANSWER_PARTS, MOCK_ANSWER, usage, options.onFinish);
   }
 }
 
@@ -169,6 +169,9 @@ class GroqInferenceProvider implements InferenceProvider {
       prompt: options.prompt,
       // `onEnd` fires after the full generation; the SDK awaits it before the stream
       // ends, so the route's persistence completes before the response body closes.
+      // NOTE (M5 trap): `event.text` is a `string` for single-step calls (our case). If a
+      // multi-step config (e.g. `stopWhen`) is ever added, `event.text` becomes a
+      // `Promise<string>` — re-verify this access then, or it would persist "[object Promise]".
       onEnd: async (event) => {
         if (!options.onFinish) return;
         await options.onFinish({
@@ -207,8 +210,14 @@ export function createInferenceProvider(): InferenceProvider {
     );
   }
 
-  // Default/groq path. Fall back to the mock when no key is configured (embedder parity).
+  // Default/groq path. Fall back to the mock when no key is configured (embedder parity) —
+  // but WARN loudly so a prod deploy that forgot GROQ_API_KEY can't silently serve mock
+  // answers to real users. (Failing closed in production is deferred to M10 hardening.)
   if (!process.env.GROQ_API_KEY) {
+    console.warn(
+      "INFERENCE_PROVIDER=groq but GROQ_API_KEY is unset — using the mock inference provider. " +
+        "Set GROQ_API_KEY for real inference (mock answers are not real).",
+    );
     return new MockInferenceProvider();
   }
   return new GroqInferenceProvider();
