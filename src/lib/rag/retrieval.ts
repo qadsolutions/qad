@@ -72,8 +72,13 @@ export function getMinSimilarity(): number {
 }
 
 /**
- * Return the top-k document chunks most similar to `queryEmbedding`, scoped to
- * `tenantId`.
+ * Return up to the top-k document chunks most similar to `queryEmbedding`,
+ * scoped to `tenantId`, that meet the `RAG_MIN_SIMILARITY` threshold.
+ *
+ * The returned count can be lower than `topK`: results below the similarity
+ * threshold are filtered out after retrieval, so a small or unrelated corpus
+ * can legitimately return fewer chunks than requested, including an empty
+ * array when nothing qualifies.
  *
  * @param supabase       Caller's Supabase client. Prefer the authenticated client
  *                       (from `withTenant`) so RLS enforces isolation automatically.

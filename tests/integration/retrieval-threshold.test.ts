@@ -141,10 +141,12 @@ describe("searchSimilarChunks — similarity threshold (RAG_MIN_SIMILARITY) inte
     const results = await searchSimilarChunks(client, TENANT_ID, QUERY_NEAR_DIM_10);
 
     // Both chunks should survive: CHUNK_NEAR (sim ≈ 1.0) and CHUNK_FAR (sim ≈ 0.0),
-    // both >= 0.0 default threshold.
-    expect(results.length).toBeGreaterThanOrEqual(1);
+    // both >= 0.0 default threshold. Asserting both explicitly (not just length)
+    // so a `>` vs `>=` regression at the boundary can't pass silently.
+    expect(results).toHaveLength(2);
     const ids = results.map((r) => r.chunkId);
     expect(ids).toContain(CHUNK_NEAR_ID);
+    expect(ids).toContain(CHUNK_FAR_ID);
   });
 
   it("returns empty array when all chunks are below the threshold (all-below case)", async () => {
