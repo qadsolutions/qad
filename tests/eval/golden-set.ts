@@ -229,6 +229,9 @@ export const NEGATIVE_QUESTIONS: NegativeQuestion[] = [
   // out_of_domain — near (adjacent home-services the corpus doesn't cover)
   { id: "nq-plumbing", reason: "out_of_domain", question: "Do you do plumbing repairs like fixing a leaky faucet?" },
   { id: "nq-electrical", reason: "out_of_domain", question: "Can you rewire the electrical panel in my house?" },
+  // out_of_domain — near-boundary HVAC-adjacent (calibration probes for #97 threshold)
+  { id: "nq-duct-sealing", reason: "out_of_domain", question: "Do you offer duct sealing or indoor air quality testing?" },
+  { id: "nq-solar", reason: "out_of_domain", question: "Can you install solar panels or a solar water heater?" },
   // underspecified — in-domain but too vague to answer from a single chunk
   { id: "nq-vague-cost", reason: "underspecified", question: "How much will it cost?" },
   { id: "nq-availability", reason: "underspecified", question: "Can you come out?" },

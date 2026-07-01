@@ -49,8 +49,36 @@ export function getTopK(): number {
 }
 
 /**
- * Return the top-k document chunks most similar to `queryEmbedding`, scoped to
- * `tenantId`.
+ * Read `RAG_MIN_SIMILARITY` from the environment.
+ *
+ * Returns the configured minimum cosine similarity threshold in [-1, 1].
+ * Chunks whose similarity falls below this value are filtered out of
+ * `searchSimilarChunks` results before they reach the prompt builder or
+ * inference layer.
+ *
+ * Defaults to `0.0` (permissive) so existing behaviour is preserved unless
+ * the variable is explicitly set. Warns and falls back to the default when
+ * the value is present but invalid (NaN, outside [-1, 1]).
+ */
+export function getMinSimilarity(): number {
+  const raw = process.env.RAG_MIN_SIMILARITY;
+  if (!raw) return 0.0;
+  const parsed = parseFloat(raw);
+  if (!Number.isNaN(parsed) && parsed >= -1 && parsed <= 1) return parsed;
+  console.warn(
+    `RAG_MIN_SIMILARITY="${raw}" is not a valid number in [-1, 1]; defaulting to 0.0`,
+  );
+  return 0.0;
+}
+
+/**
+ * Return up to the top-k document chunks most similar to `queryEmbedding`,
+ * scoped to `tenantId`, that meet the `RAG_MIN_SIMILARITY` threshold.
+ *
+ * The returned count can be lower than `topK`: results below the similarity
+ * threshold are filtered out after retrieval, so a small or unrelated corpus
+ * can legitimately return fewer chunks than requested, including an empty
+ * array when nothing qualifies.
  *
  * @param supabase       Caller's Supabase client. Prefer the authenticated client
  *                       (from `withTenant`) so RLS enforces isolation automatically.
@@ -93,10 +121,14 @@ export async function searchSimilarChunks(
     );
   }
 
-  return data.map((row) => ({
-    chunkId: row.chunk_id,
-    documentId: row.document_id,
-    chunkText: row.chunk_text,
-    similarity: row.similarity,
-  }));
+  const minSimilarity = getMinSimilarity();
+
+  return data
+    .map((row) => ({
+      chunkId: row.chunk_id,
+      documentId: row.document_id,
+      chunkText: row.chunk_text,
+      similarity: row.similarity,
+    }))
+    .filter((chunk) => chunk.similarity >= minSimilarity);
 }
