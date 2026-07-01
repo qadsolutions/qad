@@ -543,6 +543,7 @@ export type Database = {
           query_embedding: string
           p_tenant_id: string
           p_top_k?: number
+          p_ef_search?: number
         }
         Returns: {
           chunk_id: string
