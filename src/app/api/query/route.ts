@@ -106,8 +106,15 @@ async function resolveConversationId(
       .eq("tenant_id", tenantId)
       .eq("user_id", userId)
       .maybeSingle();
-    if (!error && data) return data.id;
-    // Not found / not this user's / lookup error → fall through and create a fresh one.
+    if (error) {
+      // A genuine backend failure — log it (don't let it masquerade as a benign
+      // "not found"), then fall through and create a fresh conversation. This keeps the
+      // module's "no silently-swallowed errors" contract.
+      console.error(`conversation lookup failed for tenant ${tenantId}: ${error.message}`);
+    } else if (data) {
+      return data.id;
+    }
+    // Not found / not this user's / logged lookup error → fall through, create a fresh one.
   }
 
   const newId = crypto.randomUUID();
@@ -197,25 +204,19 @@ async function persistAssistantTurn(
     await insertRetrievalLog(admin, tenantId, assistantMessageId, chunkIdsUsed, similarityScores);
   }
 
-  // Best-effort usage accounting — must not fail the (already-streamed) response.
-  try {
-    const { error } = await admin.from("model_calls").insert({
-      tenant_id: tenantId,
-      user_id: userId,
-      model_name: modelName,
-      prompt_tokens: usage.promptTokens,
-      completion_tokens: usage.completionTokens,
-      latency_ms: latencyMs,
-    });
-    if (error) {
-      console.error(`model_calls insert failed for tenant ${tenantId} user ${userId}: ${error.message}`);
-    }
-  } catch (err) {
-    console.error(
-      `model_calls insert threw for tenant ${tenantId} user ${userId}: ${
-        err instanceof Error ? err.message : String(err)
-      }`,
-    );
+  // Best-effort usage accounting — must not fail the (already-streamed) response. Like the
+  // other post-answer writes, PostgREST returns failures in `{ error }` (it doesn't throw),
+  // so we check + log, consistent with insertMessage/insertRetrievalLog (no try/catch).
+  const { error } = await admin.from("model_calls").insert({
+    tenant_id: tenantId,
+    user_id: userId,
+    model_name: modelName,
+    prompt_tokens: usage.promptTokens,
+    completion_tokens: usage.completionTokens,
+    latency_ms: latencyMs,
+  });
+  if (error) {
+    console.error(`model_calls insert failed for tenant ${tenantId} user ${userId}: ${error.message}`);
   }
 }
 
@@ -300,7 +301,8 @@ export const queryHandler: TenantRouteHandler = async (req, { tenant }) => {
     if (assistantMessageId) {
       await insertRetrievalLog(admin, tenant.tenantId, assistantMessageId, [], []);
     }
-    // Trivially stream the canned text so the client sees one consistent response shape.
+    // Plain text response for the canned answer — same content-type as the streamed path,
+    // so the client sees one consistent response shape.
     return new Response(EMPTY_CONTEXT_ANSWER, {
       status: 200,
       headers: { "Content-Type": "text/plain; charset=utf-8", ...citationsHeader },

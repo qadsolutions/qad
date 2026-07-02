@@ -260,6 +260,67 @@ describe("queryHandler", () => {
     expect(createEmbedder).not.toHaveBeenCalled();
   });
 
+  it("accepts a question of exactly the max length (boundary)", async () => {
+    mockAdmin();
+    mockEmbedder();
+    mockRetrieval([chunk("c1", "ctx", 0.8)]);
+    mockProvider();
+    const res = await queryHandler(queryRequest({ question: "x".repeat(8000) }), ctx());
+    expect(res.status).toBe(200);
+    await res.text();
+    expect(createEmbedder).toHaveBeenCalledOnce();
+  });
+
+  it("creates a fresh conversation when the supplied id isn't the user's (fallback)", async () => {
+    const admin = mockAdmin({ conversationLookup: null }); // lookup finds nothing
+    mockEmbedder();
+    mockRetrieval([chunk("c1", "ctx", 0.8)]);
+    mockProvider();
+
+    const res = await queryHandler(
+      queryRequest({ question: "hi", conversation_id: "dddddddd-dddd-dddd-dddd-dddddddddddd" }),
+      ctx(),
+    );
+    await res.text();
+
+    // A fresh conversation is created; messages attach to it, not the (rejected) supplied id.
+    expect(admin.inserts.conversations).toHaveLength(1);
+    const newId = admin.inserts.conversations[0].id;
+    expect(admin.inserts.messages[0]).toMatchObject({ conversation_id: newId });
+  });
+
+  it("ignores a non-string conversation_id and creates a fresh conversation", async () => {
+    const admin = mockAdmin();
+    mockEmbedder();
+    mockRetrieval([chunk("c1", "ctx", 0.8)]);
+    mockProvider();
+
+    // conversation_id is a number → parseBody drops it → no ownership lookup, fresh convo.
+    const res = await queryHandler(queryRequest({ question: "hi", conversation_id: 123 }), ctx());
+    await res.text();
+
+    expect(admin.conversationFilters).toHaveLength(0); // no lookup attempted
+    expect(admin.inserts.conversations).toHaveLength(1);
+  });
+
+  it("aligns retrieval-log similarity scores to the reranked citation order", async () => {
+    const admin = mockAdmin();
+    mockEmbedder();
+    // Input order is NOT similarity order — buildPrompt reranks descending by similarity.
+    mockRetrieval([chunk("low", "l", 0.2), chunk("high", "h", 0.95), chunk("mid", "m", 0.6)]);
+    mockProvider();
+
+    const res = await queryHandler(queryRequest({ question: "q" }), ctx());
+    await res.text();
+
+    // Citations + retrieval log follow the reranked order (high, mid, low), scores aligned.
+    expect(JSON.parse(res.headers.get("X-Citations") ?? "null")).toEqual(["high", "mid", "low"]);
+    expect(admin.inserts.retrieval_logs[0]).toMatchObject({
+      chunk_ids: ["high", "mid", "low"],
+      similarity_scores: [0.95, 0.6, 0.2],
+    });
+  });
+
   it("still returns 200 (best-effort) when a post-answer log insert fails", async () => {
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const admin = mockAdmin({ insertErrors: { retrieval_logs: { message: "log down" } } });
