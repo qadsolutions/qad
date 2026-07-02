@@ -57,6 +57,8 @@ function mockAdmin(
   opts: {
     currentCount?: number;
     conversationLookup?: { id: string } | null;
+    /** Force the conversation ownership lookup (maybeSingle) to return a backend error. */
+    conversationLookupError?: { message: string };
     /** Force a given table's insert to return an error (drives the 500 / best-effort paths). */
     insertErrors?: Partial<Record<keyof AdminInserts, { message: string }>>;
   } = {},
@@ -86,8 +88,8 @@ function mockAdmin(
     // conversations lookup: select("id").eq("id").eq("tenant_id").eq("user_id").maybeSingle().
     // Fluent chain records each .eq filter and supports any number of them.
     const maybeSingle = vi.fn(async () => ({
-      data: opts.conversationLookup ?? null,
-      error: null,
+      data: opts.conversationLookupError ? null : (opts.conversationLookup ?? null),
+      error: opts.conversationLookupError ?? null,
     }));
     const selectChain = {
       eq: vi.fn((column: string, value: unknown) => {
@@ -287,6 +289,27 @@ describe("queryHandler", () => {
     expect(admin.inserts.conversations).toHaveLength(1);
     const newId = admin.inserts.conversations[0].id;
     expect(admin.inserts.messages[0]).toMatchObject({ conversation_id: newId });
+  });
+
+  it("logs and falls back to a fresh conversation when the ownership lookup errors", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const admin = mockAdmin({ conversationLookupError: { message: "lookup boom" } });
+    mockEmbedder();
+    mockRetrieval([chunk("c1", "ctx", 0.8)]);
+    mockProvider();
+
+    const res = await queryHandler(
+      queryRequest({ question: "hi", conversation_id: "dddddddd-dddd-dddd-dddd-dddddddddddd" }),
+      ctx(),
+    );
+    await res.text();
+
+    expect(res.status).toBe(200);
+    // A genuine lookup error is logged (not silently treated as "not found")…
+    expect(errorSpy).toHaveBeenCalled();
+    // …and a fresh conversation is still created so the query proceeds.
+    expect(admin.inserts.conversations).toHaveLength(1);
+    errorSpy.mockRestore();
   });
 
   it("ignores a non-string conversation_id and creates a fresh conversation", async () => {

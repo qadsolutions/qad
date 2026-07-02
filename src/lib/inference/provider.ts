@@ -52,10 +52,12 @@ export interface StreamChatOptions {
   prompt: string;
   /**
    * Invoked exactly once when generation finishes, before the response stream closes.
-   * The route persists the assistant message + logs here. Errors thrown by the callback
-   * are the route's responsibility to contain — see the route's best-effort logging.
+   * The route persists the assistant message + logs here. Returns `Promise<void>` (not
+   * `void`) on purpose: post-answer persistence is async, and the provider AWAITS this —
+   * a `void` signature would let a caller fire-and-forget async work that races the stream
+   * close and silently drops the writes. Errors thrown are the caller's to contain.
    */
-  onFinish?: (finish: InferenceFinish) => void | Promise<void>;
+  onFinish?: (finish: InferenceFinish) => Promise<void>;
 }
 
 export interface ChatStreamResult {
@@ -167,11 +169,10 @@ class GroqInferenceProvider implements InferenceProvider {
       model: groq(this.modelName),
       system: options.system,
       prompt: options.prompt,
-      // `onEnd` fires after the full generation; the SDK awaits it before the stream
-      // ends, so the route's persistence completes before the response body closes.
-      // NOTE (M5 trap): `event.text` is a `string` for single-step calls (our case). If a
-      // multi-step config (e.g. `stopWhen`) is ever added, `event.text` becomes a
-      // `Promise<string>` — re-verify this access then, or it would persist "[object Promise]".
+      // `onEnd` fires once after generation, awaited by the SDK before the stream ends, so
+      // the route's persistence completes before the response body closes. `event.text`
+      // here is the fully-resolved answer (the `Promise<string>` caveat only applies to
+      // `result.text` accessed OUTSIDE this callback, which we don't do).
       onEnd: async (event) => {
         if (!options.onFinish) return;
         await options.onFinish({

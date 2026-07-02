@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { buildPrompt } from "@/lib/rag/prompt";
 import { createInferenceProvider, type InferenceFinish } from "@/lib/inference/provider";
@@ -52,6 +52,11 @@ const TTFT_TARGET_MS = 3_000;
 const FULL_RESPONSE_TARGET_MS = 10_000;
 
 describe.skipIf(!GROQ_API_KEY)("Groq live inference smoke test", () => {
+  // In afterEach (not the test body) so stubs are cleared even if the live call times out.
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
   it(
     "streams a grounded answer from synthetic context and meets the TTFT/full-response targets",
     async () => {
@@ -77,7 +82,7 @@ describe.skipIf(!GROQ_API_KEY)("Groq live inference smoke test", () => {
       const result = provider.streamChat({
         system: built.system,
         prompt: built.user,
-        onFinish: (f) => {
+        onFinish: async (f) => {
           finish = f;
         },
       });
@@ -113,8 +118,6 @@ describe.skipIf(!GROQ_API_KEY)("Groq live inference smoke test", () => {
       expect(finish).toBeDefined();
       expect(finish?.text.length).toBeGreaterThan(0);
       expect(finish?.usage.completionTokens).toBeGreaterThan(0);
-
-      vi.unstubAllEnvs();
     },
     FULL_RESPONSE_TARGET_MS + 10_000, // generous test timeout around the live call
   );

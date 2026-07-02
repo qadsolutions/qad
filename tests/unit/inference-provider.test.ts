@@ -66,7 +66,7 @@ describe("MockInferenceProvider — deterministic streaming", () => {
       .streamChat({
         system: "system instructions here",
         prompt: "Context: [1] foo\n\nQuestion: bar",
-        onFinish: (f) => {
+        onFinish: async (f) => {
           finishes.push(f);
         },
       })
@@ -92,7 +92,7 @@ describe("MockInferenceProvider — deterministic streaming", () => {
     const run = async () => {
       let finish: InferenceFinish | undefined;
       const res = provider
-        .streamChat({ system: "s", prompt: "p", onFinish: (f) => void (finish = f) })
+        .streamChat({ system: "s", prompt: "p", onFinish: async (f) => void (finish = f) })
         .toResponse();
       const text = await res.text();
       return { text, finish };

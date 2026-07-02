@@ -273,7 +273,10 @@ export const queryHandler: TenantRouteHandler = async (req, { tenant }) => {
     return errorResponse(500, "internal_error", "Failed to record the message");
   }
 
-  // 4. Embed the question and run tenant-filtered vector search.
+  // 4. Embed the question and run tenant-filtered vector search. NOTE: a throw here (after
+  // the step-3 rows are committed) propagates to a 500 and leaves an orphaned user turn with
+  // no assistant reply — same failure category as the client-abort gap; partial/abort safety
+  // is tracked for M10 (#107).
   const [embedding] = await createEmbedder().embed([question]);
   const chunks = await searchSimilarChunks(admin, tenant.tenantId, embedding);
 
@@ -283,7 +286,16 @@ export const queryHandler: TenantRouteHandler = async (req, { tenant }) => {
   );
   // Similarity scores aligned to the cited chunk ids (presentation order from buildPrompt).
   const similarityById = new Map(chunks.map((c) => [c.chunkId, c.similarity]));
-  const similarityScores = built.chunkIdsUsed.map((id) => similarityById.get(id) ?? 0);
+  const similarityScores = built.chunkIdsUsed.map((id) => {
+    const score = similarityById.get(id);
+    if (score === undefined) {
+      // Unreachable today — every cited id comes from `chunks`. Warn so a future buildPrompt
+      // change that breaks that invariant surfaces immediately instead of logging a silent 0.
+      console.warn(`cited chunk ${id} has no retrieval score — defaulting to 0 (tenant ${tenant.tenantId})`);
+      return 0;
+    }
+    return score;
+  });
 
   const citationsHeader = { "X-Citations": JSON.stringify(built.chunkIdsUsed) };
 
